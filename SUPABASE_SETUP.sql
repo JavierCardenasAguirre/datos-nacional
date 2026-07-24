@@ -141,3 +141,63 @@ $$;
 
 -- Permite que la app (rol anónimo y autenticado) pueda llamar la función.
 grant execute on function public.intel_dashboard_stats(text,text,text,text,text,text,text) to anon, authenticated, service_role;
+
+
+-- ============================================================================
+--  FUNCIÓN LIGERA DE CONTEO EXACTO  ·  intel_count
+-- ============================================================================
+--  QUÉ HACE:
+--    Devuelve el número EXACTO de registros (con los mismos filtros del
+--    dashboard) en milisegundos. Solo hace `count(*)`, nada más.
+--
+--  POR QUÉ ES NECESARIA:
+--    El "contador de eventos" del dashboard NO puede usar el conteo ESTIMADO
+--    de Postgres, porque ese estimado se basa en estadísticas del planificador
+--    que solo se actualizan cada cierto tiempo (autovacuum/ANALYZE). Por eso,
+--    al pegar una fila nueva, el dato llegaba a Supabase pero el contador NO
+--    cambiaba hasta que Postgres refrescara sus estadísticas.
+--
+--    La función grande `intel_dashboard_stats` sí da el conteo exacto, pero
+--    tarda ~25s sobre 487.000 filas y Vercel corta las funciones a los ~10s.
+--    Esta función es minúscula y responde al instante, así que el contador
+--    siempre queda EXACTO y ACTUALIZADO, incluso en producción (Vercel).
+--
+--  ¿ES SEGURA? SÍ. ES 100% DE SOLO LECTURA (solo SELECT count(*)).
+--    No modifica, no borra y no mueve ninguna fila ni columna.
+-- ============================================================================
+
+create or replace function public.intel_count(
+  p_fecha_inicio text default null,
+  p_fecha_fin    text default null,
+  p_departamento text default null,
+  p_municipio    text default null,
+  p_tipologia    text default null,
+  p_fenomeno     text default null,
+  p_estructura   text default null
+)
+returns bigint
+language sql
+stable
+security definer
+set search_path = public
+set statement_timeout = '120s'
+as $$
+  select count(*)::bigint
+  from intel_records
+  where
+    (p_fecha_inicio is null or fecha::text >= p_fecha_inicio)
+    and (p_fecha_fin  is null or fecha::text <= p_fecha_fin)
+    and (p_departamento is null or departamento = p_departamento)
+    and (p_municipio    is null or municipio    = p_municipio)
+    and (p_fenomeno     is null or fenomeno_criminalidad = p_fenomeno)
+    and (p_estructura   is null or estructura   = p_estructura)
+    and (p_tipologia is null or
+         upper(btrim(regexp_replace(
+           translate(coalesce(tipologia, ''),
+             'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
+             'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
+           '\s+', ' ', 'g')))
+         = upper(btrim(p_tipologia)));
+$$;
+
+grant execute on function public.intel_count(text,text,text,text,text,text,text) to anon, authenticated, service_role;
