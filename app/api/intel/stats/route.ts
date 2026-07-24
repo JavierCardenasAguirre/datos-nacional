@@ -1,4 +1,8 @@
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+// Vercel: da margen a las consultas. En plan Hobby se limita a 10s de todos
+// modos, pero el contador se resuelve en ~1-2s con el conteo exacto ligero.
+export const maxDuration = 30;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase, getServiceSupabase } from '@/lib/supabase';
@@ -65,29 +69,96 @@ function isMissingFunction(error: any): boolean {
   );
 }
 
+// Construye los argumentos de las funciones SQL a partir de los filtros.
+function buildRpcArgs(filters: any) {
+  return {
+    p_fecha_inicio: filters.fechaInicio ?? null,
+    p_fecha_fin: filters.fechaFin ?? null,
+    p_departamento: filters.departamento ?? null,
+    p_municipio: filters.municipio ?? null,
+    p_tipologia: filters.tipologia ?? null,
+    p_fenomeno: filters.fenomeno ?? null,
+    p_estructura: filters.estructura ?? null,
+  };
+}
+
+// ---- CONTEO EXACTO Y FRESCO (nunca estimado para el número final) --------
+// El "contador de eventos" DEBE reflejar de inmediato las filas nuevas. El
+// conteo ESTIMADO de Postgres no sirve (se actualiza tarde). Estrategia:
+//   1) RPC intel_count  -> exacto, inmune al límite de 8s de Supabase.
+//   2) count:'exact'    -> exacto vía PostgREST (por si la RPC no está instalada).
+//   3) count:'estimated'-> último recurso, para no mostrar 0.
+async function getExactCount(sb: ReturnType<typeof getServiceSupabase>, filters: any): Promise<number | null> {
+  // 1) Función SQL ligera
+  try {
+    const c = await sb.rpc('intel_count', buildRpcArgs(filters));
+    if (!c.error && typeof c.data === 'number') return c.data;
+  } catch { /* sigue al plan B */ }
+
+  // 2) Conteo exacto por PostgREST
+  try {
+    let q = sb.from('intel_records').select('*', { count: 'exact', head: true });
+    q = applyFilters(q, filters);
+    const x = await q;
+    if (!x.error && x.count != null) return x.count;
+  } catch { /* sigue al plan C */ }
+
+  // 3) Estimado (último recurso)
+  try {
+    let q = sb.from('intel_records').select('*', { count: 'estimated', head: true });
+    q = applyFilters(q, filters);
+    const e = await q;
+    return e.count ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Llama a la función pesada de agregación con un límite de tiempo. Si no
+// responde a tiempo, ABORTA la consulta (para no dejar queries de ~25s colgadas
+// ocupando conexiones de Supabase) y devuelve null -> se usa el respaldo.
+async function callBigRpcWithTimeout(
+  sb: ReturnType<typeof getServiceSupabase>,
+  rpcArgs: Record<string, any>,
+  ms: number,
+): Promise<any | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    const rpc = await sb.rpc('intel_dashboard_stats', rpcArgs).abortSignal(controller.signal);
+    return rpc;
+  } catch {
+    return null; // abortada o error
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function GET(req: NextRequest) {
   try {
     const filters = parseFilters(req.nextUrl.searchParams);
     const sb = getServiceSupabase();
 
+    // El contador exacto se resuelve SIEMPRE por su cuenta (rápido) para que
+    // sea correcto pase lo que pase con la función pesada de agregación.
+    const exactCountPromise = getExactCount(sb, filters);
+
     // =====================================================================
     // 1) CAMINO PRINCIPAL: función SQL de agregación (rápida y exacta)
     // =====================================================================
-    const rpcArgs = {
-      p_fecha_inicio: filters.fechaInicio ?? null,
-      p_fecha_fin: filters.fechaFin ?? null,
-      p_departamento: filters.departamento ?? null,
-      p_municipio: filters.municipio ?? null,
-      p_tipologia: filters.tipologia ?? null,
-      p_fenomeno: filters.fenomeno ?? null,
-      p_estructura: filters.estructura ?? null,
-    };
+    const rpcArgs = buildRpcArgs(filters);
 
-    const rpc = await sb.rpc('intel_dashboard_stats', rpcArgs);
+    // La función pesada puede tardar ~25s sobre 487K filas. La corremos "contra
+    // reloj": si no responde en 6s la abandonamos y usamos el respaldo, de modo
+    // que la petición SIEMPRE termina dentro del límite de Vercel.
+    const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 6000);
 
-    if (!rpc.error && rpc.data) {
+    if (rpc && !rpc.error && rpc.data) {
       const d: any = rpc.data;
-      const total: number = d.totalCount ?? 0;
+      // El contador SIEMPRE usa el conteo exacto y fresco (no el de la RPC, por
+      // si sus estadísticas quedaran atrás); si falla, usa el de la RPC.
+      const exactCount = await exactCountPromise;
+      const total: number = exactCount ?? d.totalCount ?? 0;
 
       const dowArr: { d: number; count: number }[] = Array.isArray(d.dow) ? d.dow : [];
       const monthArr: { m: number; count: number }[] = Array.isArray(d.month) ? d.month : [];
@@ -138,15 +209,18 @@ export async function GET(req: NextRequest) {
       return response;
     }
 
-    // Si el error NO es "función inexistente", lo propagamos.
-    if (rpc.error && !isMissingFunction(rpc.error)) {
+    // Si la RPC devolvió error (y no es "función inexistente"), lo registramos.
+    // `rpc === null` significa que se agotó el tiempo (6s) -> usamos respaldo.
+    if (rpc && rpc.error && !isMissingFunction(rpc.error)) {
       console.error('RPC stats error:', rpc.error.message);
     }
 
     // =====================================================================
-    // 2) RESPALDO: la función SQL no está instalada -> muestreo acotado
+    // 2) RESPALDO: función lenta/no instalada -> muestreo acotado.
+    //    El contador usa el conteo EXACTO (no el estimado del muestreo).
     // =====================================================================
-    const fallbackData = await fallbackSample(req, filters, sb);
+    const exactCount = await exactCountPromise;
+    const fallbackData = await fallbackSample(req, filters, sb, exactCount);
     
     // 🔥 RESPONDE CON HEADERS ANTI-CACHÉ TAMBIÉN PARA FALLBACK
     const response = NextResponse.json(fallbackData);
@@ -165,15 +239,20 @@ export async function GET(req: NextRequest) {
   }
 }
 
-async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<typeof getServiceSupabase>) {
-  // Conteo total estimado CON FILTROS (rápido; el exacto agota el tiempo con 487K filas)
+async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<typeof getServiceSupabase>, exactTotal?: number | null) {
+  // El contador usa el conteo EXACTO calculado aparte (fresco). Solo si ese
+  // fallara, recurrimos al estimado (rápido pero puede quedar desactualizado).
   let total = 0;
-  try {
-    let estQuery = sb.from('intel_records').select('*', { count: 'estimated', head: true });
-    estQuery = applyFilters(estQuery, filters);
-    const est = await estQuery;
-    total = est.count ?? 0;
-  } catch { /* ignore */ }
+  if (typeof exactTotal === 'number') {
+    total = exactTotal;
+  } else {
+    try {
+      let estQuery = sb.from('intel_records').select('*', { count: 'estimated', head: true });
+      estQuery = applyFilters(estQuery, filters);
+      const est = await estQuery;
+      total = est.count ?? 0;
+    } catch { /* ignore */ }
+  }
 
   const fieldCounts: Record<string, Record<string, number>> = {
     departamento: {}, municipio: {}, tipologia: {},
