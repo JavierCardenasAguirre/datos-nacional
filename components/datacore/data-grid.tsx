@@ -37,7 +37,12 @@ const SAVE_BATCH = 500;
 
 export default function DataGrid() {
   const { isAdmin } = useAuth();
-  const { refreshData, forceUpdateCounter } = useIntel(); // 👈 AGREGAR forceUpdateCounter
+  const { refreshData, forceUpdateCounter } = useIntel();
+  
+  // 🔥 LOG PARA VERIFICAR QUE forceUpdateCounter ESTÁ DISPONIBLE
+  console.log('🔍 DataGrid - forceUpdateCounter disponible:', !!forceUpdateCounter);
+  console.log('🔍 DataGrid - refreshData disponible:', !!refreshData);
+  
   const [rows, setRows] = useState<Row[]>([emptyRow()]);
   const [saving, setSaving] = useState(false);
 
@@ -71,6 +76,8 @@ export default function DataGrid() {
     }
     setSaving(true);
     try {
+      console.log('🟢 1. Guardando registros manuales...', validRows.length);
+      
       const res = await fetch('/api/intel/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -78,22 +85,30 @@ export default function DataGrid() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      
+      console.log('🟢 2. Registros manuales guardados:', data.count);
       toast.success(`${data.count} registro(s) guardados exitosamente.`);
       setRows([emptyRow()]);
       
       // 🔥 ACTUALIZAR CONTADOR CON forceUpdateCounter
+      console.log('🟢 3. Llamando a forceUpdateCounter desde saveRows...');
       try {
         const updatedStats = await forceUpdateCounter();
+        console.log('🟢 4. Resultado de forceUpdateCounter en saveRows:', updatedStats);
         if (updatedStats) {
-          console.log('📊 Contador actualizado:', updatedStats.totalCount);
+          console.log('📊 Contador actualizado en saveRows:', updatedStats.totalCount);
+          toast.info(`Total: ${updatedStats.totalCount.toLocaleString()} registros`);
+        } else {
+          console.log('🟡 4. forceUpdateCounter devolvió null, usando refreshData');
+          await refreshData();
         }
       } catch (err) {
-        console.error('Error actualizando contador:', err);
-        // Fallback: refreshData
+        console.error('🔴 Error en forceUpdateCounter (saveRows):', err);
         await refreshData();
       }
       
     } catch (err: any) {
+      console.error('🔴 Error en saveRows:', err);
       toast.error('Error: ' + (err?.message ?? 'desconocido'));
     } finally {
       setSaving(false);
@@ -121,6 +136,7 @@ export default function DataGrid() {
     setSavingPaste(true);
     setPasteProgress('');
     try {
+      console.log('🟢 1. Guardando registros pegados...', pastePreview.length);
       let total = 0;
       const totalRows = pastePreview.length;
       for (let i = 0; i < totalRows; i += SAVE_BATCH) {
@@ -135,22 +151,29 @@ export default function DataGrid() {
         if (!res.ok) throw new Error(data.error ?? 'Error al guardar');
         total += data.count ?? 0;
       }
+      console.log('🟢 2. Registros pegados guardados:', total);
       toast.success(`${total.toLocaleString()} registro(s) cargados desde Excel.`);
       clearPaste();
       
       // 🔥 ACTUALIZAR CONTADOR CON forceUpdateCounter
+      console.log('🟢 3. Llamando a forceUpdateCounter desde savePasted...');
       try {
         const updatedStats = await forceUpdateCounter();
+        console.log('🟢 4. Resultado de forceUpdateCounter en savePasted:', updatedStats);
         if (updatedStats) {
-          console.log('📊 Contador actualizado:', updatedStats.totalCount);
+          console.log('📊 Contador actualizado en savePasted:', updatedStats.totalCount);
+          toast.info(`Total: ${updatedStats.totalCount.toLocaleString()} registros`);
+        } else {
+          console.log('🟡 4. forceUpdateCounter devolvió null, usando refreshData');
+          await refreshData();
         }
       } catch (err) {
-        console.error('Error actualizando contador:', err);
-        // Fallback: refreshData
+        console.error('🔴 Error en forceUpdateCounter (savePasted):', err);
         await refreshData();
       }
       
     } catch (err: any) {
+      console.error('🔴 Error en savePasted:', err);
       toast.error('Error: ' + (err?.message ?? 'desconocido'));
     } finally {
       setSavingPaste(false);
