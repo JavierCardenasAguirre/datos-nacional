@@ -36,11 +36,35 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
                 const secs = Math.floor((Date.now() - startTime) / 1000);
                 toast.success(`${count.toLocaleString()} registros insertados en ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}.`);
 
-                // 🔥 RECARGAR LA PÁGINA DESPUÉS DE IMPORTAR
-                toast.info('Actualizando datos...', { duration: 2000 });
-                setTimeout(() => {
-                    window.location.reload();
-                }, 1500);
+                // 🔥 FORZAR ACTUALIZACIÓN CON VERIFICACIÓN
+                try {
+                    console.log('🔄 Actualizando datos...');
+                    await refreshData();
+                    console.log('✅ refreshData completado');
+
+                    // 🔥 ACTUALIZACIÓN MANUAL: Si refreshData no funciona, actualizar manualmente
+                    // Esto asume que tu contexto tiene un setter para stats
+                    // O puedes hacer una consulta directa a Supabase
+                    const response = await fetch('/api/stats');
+                    if (response.ok) {
+                        const newStats = await response.json();
+                        // Si tienes acceso al contexto, actualiza stats manualmente
+                        // setStats(newStats); // Necesitarías exponer esto desde el contexto
+                    }
+
+                    // Esperar 1 segundo y recargar la página
+                    toast.info('Actualizando vista...', { duration: 1500 });
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1500);
+
+                } catch (err) {
+                    console.error('❌ Error actualizando:', err);
+                    // Si falla, recargar directamente
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 2000);
+                }
             }
         } catch (err: any) {
             toast.error('Error al procesar: ' + (err?.message ?? 'desconocido'));
