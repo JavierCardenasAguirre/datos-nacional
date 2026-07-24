@@ -37,7 +37,7 @@ const SAVE_BATCH = 500;
 
 export default function DataGrid() {
   const { isAdmin } = useAuth();
-  const { refreshData } = useIntel();
+  const { refreshData, forceUpdateCounter } = useIntel(); // 👈 AGREGAR forceUpdateCounter
   const [rows, setRows] = useState<Row[]>([emptyRow()]);
   const [saving, setSaving] = useState(false);
 
@@ -80,13 +80,25 @@ export default function DataGrid() {
       if (!res.ok) throw new Error(data.error);
       toast.success(`${data.count} registro(s) guardados exitosamente.`);
       setRows([emptyRow()]);
-      await refreshData();
+      
+      // 🔥 ACTUALIZAR CONTADOR CON forceUpdateCounter
+      try {
+        const updatedStats = await forceUpdateCounter();
+        if (updatedStats) {
+          console.log('📊 Contador actualizado:', updatedStats.totalCount);
+        }
+      } catch (err) {
+        console.error('Error actualizando contador:', err);
+        // Fallback: refreshData
+        await refreshData();
+      }
+      
     } catch (err: any) {
       toast.error('Error: ' + (err?.message ?? 'desconocido'));
     } finally {
       setSaving(false);
     }
-  }, [rows, refreshData]);
+  }, [rows, refreshData, forceUpdateCounter]);
 
   // --- Pegado desde Excel ---
   const handlePasteChange = useCallback((text: string) => {
@@ -125,14 +137,26 @@ export default function DataGrid() {
       }
       toast.success(`${total.toLocaleString()} registro(s) cargados desde Excel.`);
       clearPaste();
-      await refreshData();
+      
+      // 🔥 ACTUALIZAR CONTADOR CON forceUpdateCounter
+      try {
+        const updatedStats = await forceUpdateCounter();
+        if (updatedStats) {
+          console.log('📊 Contador actualizado:', updatedStats.totalCount);
+        }
+      } catch (err) {
+        console.error('Error actualizando contador:', err);
+        // Fallback: refreshData
+        await refreshData();
+      }
+      
     } catch (err: any) {
       toast.error('Error: ' + (err?.message ?? 'desconocido'));
     } finally {
       setSavingPaste(false);
       setPasteProgress('');
     }
-  }, [pastePreview, refreshData, clearPaste]);
+  }, [pastePreview, refreshData, forceUpdateCounter, clearPaste]);
 
   if (!isAdmin) {
     return (
