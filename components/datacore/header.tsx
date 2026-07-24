@@ -36,17 +36,15 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
                 const secs = Math.floor((Date.now() - startTime) / 1000);
                 toast.success(`${count.toLocaleString()} registros insertados en ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}.`);
 
-                // 🔥 FORZAR ACTUALIZACIÓN COMPLETA
+                // 🔥 SOLUCIÓN PARA PRODUCCIÓN:
+                // Esperar a que se complete la actualización de datos en el contexto
                 await refreshData();
 
-                // 🔥 ACTUALIZACIÓN ADICIONAL: Forzar recálculo del contador
-                // Si tu contexto tiene una función para actualizar stats, úsala
-                // O puedes hacer una recarga suave de los datos
-                setTimeout(() => {
-                    // Esto asume que refreshData actualiza el estado
-                    // Si no funciona, descomenta la línea de abajo
-                    // window.location.reload();
-                }, 500);
+                // Forzar una segunda actualización después de un breve retraso
+                // para asegurar que los datos se sincronicen en el entorno de Vercel
+                setTimeout(async () => {
+                    await refreshData();
+                }, 300);
             }
         } catch (err: any) {
             toast.error('Error al procesar: ' + (err?.message ?? 'desconocido'));
