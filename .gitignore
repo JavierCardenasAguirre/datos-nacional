@@ -42,3 +42,5 @@ prisma/*.db
 # Caches
 .cache/
 .parcel-cache/
+.vercel
+.env*

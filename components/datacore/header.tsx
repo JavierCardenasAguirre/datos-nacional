@@ -3,7 +3,7 @@
 import { useIntel } from '@/contexts/intel-context';
 import { useAuth } from '@/contexts/auth-context';
 import { Upload, Trash2, Calendar, X, Activity, Loader2, Users, LogOut, User, Menu } from 'lucide-react';
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import { importToSupabase, type ImportProgress } from '@/lib/import-supabase';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -13,6 +13,7 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
   const {
     isDataLoaded, isLoading, filters, setFilters,
     uniqueValues, stats, destroyData, refreshData,
+    forceUpdateCounter, // 👈 AGREGAR LA NUEVA FUNCIÓN
   } = useIntel();
   const { user, isAdmin, logout } = useAuth();
   const router = useRouter();
@@ -21,69 +22,58 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [importProgress, setImportProgress] = useState<ImportProgress>({ message: '', percent: 0 });
-  const [isReloading, setIsReloading] = useState(false);
-
-  // Detectar si venimos de una recarga por importación
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('reloaded') === 'true') {
-      // Limpiar el parámetro de la URL
-      const newUrl = window.location.pathname;
-      window.history.replaceState({}, '', newUrl);
-      // Forzar actualización de datos
-      refreshData();
-    }
-  }, [refreshData]);
 
   const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e?.target?.files?.[0];
     if (!file) return;
-    
-    if (isReloading) return; // Evitar múltiples importaciones
-    
     setImporting(true);
-    setIsReloading(true);
     setImportProgress({ message: 'Iniciando...', percent: 0 });
     const startTime = Date.now();
-    
     try {
       const count = await importToSupabase(file, (p) => setImportProgress(p));
-      
       if (count === 0) {
         toast.error('No se encontraron registros válidos en el archivo.');
-        setIsReloading(false);
-        setImporting(false);
-        setImportProgress({ message: '', percent: 0 });
-        if (fileInputRef?.current) fileInputRef.current.value = '';
-        return;
+      } else {
+        const secs = Math.floor((Date.now() - startTime) / 1000);
+        toast.success(`${count.toLocaleString()} registros insertados en ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}.`);
+        
+        // 🔥 USAR forceUpdateCounter PARA ACTUALIZAR EL CONTADOR
+        toast.info('Actualizando contador...', { duration: 1500 });
+        
+        try {
+          const updatedStats = await forceUpdateCounter();
+          if (updatedStats && updatedStats.totalCount > 0) {
+            toast.success(`Contador actualizado: ${updatedStats.totalCount.toLocaleString()} registros`, { duration: 2000 });
+          } else {
+            // Si falla, recargar la página como fallback
+            toast.warning('Recargando página...', { duration: 1500 });
+            setTimeout(() => {
+              window.location.href = '/?t=' + Date.now();
+            }, 1500);
+          }
+        } catch (error) {
+          console.error('❌ Error actualizando contador:', error);
+          // Fallback: recargar página
+          toast.warning('Recargando página...', { duration: 1500 });
+          setTimeout(() => {
+            window.location.href = '/?t=' + Date.now();
+          }, 1500);
+        }
       }
-
-      const secs = Math.floor((Date.now() - startTime) / 1000);
-      toast.success(`${count.toLocaleString()} registros insertados en ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}.`);
-      
-      // 🔥 RECARGAR LA PÁGINA FORZADAMENTE
-      toast.info('Actualizando vista...', { duration: 1500 });
-      
-      setTimeout(() => {
-        // Recargar con un parámetro para saber que venimos de una importación
-        window.location.href = '/?reloaded=true&t=' + Date.now();
-      }, 1500);
-      
     } catch (err: any) {
       toast.error('Error al procesar: ' + (err?.message ?? 'desconocido'));
-      setIsReloading(false);
+    } finally {
       setImporting(false);
       setImportProgress({ message: '', percent: 0 });
       if (fileInputRef?.current) fileInputRef.current.value = '';
     }
-  }, [isReloading]);
+  }, [forceUpdateCounter]);
 
   const handleDestroy = useCallback(async () => {
     setShowDestroyConfirm(false);
     try {
       await destroyData();
       toast.success('Datos destruidos exitosamente.');
-      // Recargar después de destruir
       setTimeout(() => {
         window.location.reload();
       }, 1000);
@@ -134,13 +124,11 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
             )}
             {isAdmin ? (
               <>
-                <button 
-                  onClick={() => fileInputRef?.current?.click?.()}
-                  disabled={importing || isReloading}
-                  className="flex items-center gap-1 bg-cyan-600 hover:bg-cyan-500 text-white px-2 py-0.5 rounded text-[10px] font-semibold transition-all disabled:opacity-50"
-                >
+                <button onClick={() => fileInputRef?.current?.click?.()}
+                  disabled={importing}
+                  className="flex items-center gap-1 bg-cyan-600 hover:bg-cyan-500 text-white px-2 py-0.5 rounded text-[10px] font-semibold transition-all disabled:opacity-50">
                   <Upload className="w-3 h-3" />
-                  {importing ? `${importProgress.percent}%` : (isReloading ? 'RECARGANDO...' : 'IMPORTAR')}
+                  {importing ? `${importProgress.percent}%` : 'IMPORTAR'}
                 </button>
                 <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} className="hidden" />
               </>
@@ -218,15 +206,6 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
               <div className="h-full rounded-full transition-all duration-500 ease-out"
                 style={{ width: `${Math.max(2, importProgress.percent)}%`, background: 'linear-gradient(90deg, #06b6d4, #22d3ee, #67e8f9)', boxShadow: '0 0 8px rgba(6, 182, 212, 0.4)' }} />
             </div>
-          </div>
-        </div>
-      )}
-
-      {isReloading && !importing && (
-        <div className="fixed top-[4.5rem] left-0 right-0 z-[90] bg-slate-800/95 backdrop-blur-sm border-b border-cyan-700/40 px-4 py-3">
-          <div className="max-w-2xl mx-auto flex items-center justify-center gap-2">
-            <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
-            <span className="text-cyan-400 text-xs font-mono">RECARGANDO DATOS...</span>
           </div>
         </div>
       )}

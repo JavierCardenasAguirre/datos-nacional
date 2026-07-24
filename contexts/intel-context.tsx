@@ -95,7 +95,8 @@ interface IntelContextType {
   uniqueValues: UniqueValues;
   destroyData: () => Promise<void>;
   refreshData: () => Promise<void>;
-  refreshStats: () => Promise<StatsData | null>; // 👈 NUEVA FUNCIÓN
+  refreshStats: () => Promise<StatsData | null>;
+  forceUpdateCounter: () => Promise<StatsData | null>; // 👈 NUEVA FUNCIÓN
 }
 
 // ---- Defaults ----
@@ -154,16 +155,23 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const params = buildParams(f);
+      const timestamp = Date.now();
       const [statsRes, mapRes] = await Promise.all([
-        fetch(`/api/intel/stats?${params}`, { 
+        fetch(`/api/intel/stats?${params}&_=${timestamp}`, { 
           signal: controller.signal,
           cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' },
+          headers: { 
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+          },
         }),
-        fetch(`/api/intel/map-points?${params}`, { 
+        fetch(`/api/intel/map-points?${params}&_=${timestamp}`, { 
           signal: controller.signal,
           cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' },
+          headers: { 
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+          },
         }),
       ]);
       if (controller.signal.aborted) return;
@@ -187,25 +195,63 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // 🔥 NUEVA FUNCIÓN: Solo actualiza las estadísticas sin recargar todo
+  // 🔥 REFRESH STATS MEJORADO CON TIMESTAMP
   const refreshStats = useCallback(async (): Promise<StatsData | null> => {
     try {
       const params = buildParams(filters);
-      const response = await fetch(`/api/intel/stats?${params}`, {
+      const timestamp = Date.now();
+      console.log('🔄 Refrescando stats con timestamp:', timestamp);
+      
+      const response = await fetch(`/api/intel/stats?${params}&_=${timestamp}`, {
         cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' },
+        headers: { 
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+        },
       });
       
       if (response.ok) {
         const statsData: StatsData = await response.json();
+        console.log('📊 Stats actualizados:', statsData.totalCount);
         setStats(statsData);
-        // También actualizar uniqueValues si es necesario
         setUniqueValues(deriveUniqueValues(statsData));
         return statsData;
       }
+      console.error('❌ Error en refreshStats:', response.status);
       return null;
     } catch (error) {
-      console.error('Error refreshing stats:', error);
+      console.error('❌ Error refreshing stats:', error);
+      return null;
+    }
+  }, [filters]);
+
+  // 🔥 NUEVA FUNCIÓN: Forzar actualización del contador sin resetear filtros
+  const forceUpdateCounter = useCallback(async (): Promise<StatsData | null> => {
+    try {
+      const params = buildParams(filters);
+      const timestamp = Date.now();
+      console.log('🔄 Forzando actualización del contador...', timestamp);
+      
+      const response = await fetch(`/api/intel/stats?${params}&_=${timestamp}`, {
+        cache: 'no-store',
+        headers: { 
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+        },
+      });
+      
+      if (response.ok) {
+        const statsData: StatsData = await response.json();
+        console.log('📊 Contador actualizado:', statsData.totalCount);
+        setStats(statsData);
+        setUniqueValues(deriveUniqueValues(statsData));
+        return statsData;
+      } else {
+        console.error('❌ Error en forceUpdateCounter:', response.status);
+        return null;
+      }
+    } catch (error) {
+      console.error('❌ Error forzando actualización:', error);
       return null;
     }
   }, [filters]);
@@ -258,7 +304,8 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       isDataLoaded, isLoading, filters, setFilters,
       stats, mapPoints, mapInfo, uniqueValues,
       destroyData, refreshData,
-      refreshStats, // 👈 EXPORTAMOS LA NUEVA FUNCIÓN
+      refreshStats,
+      forceUpdateCounter, // 👈 EXPORTAMOS LA NUEVA FUNCIÓN
     }}>
       {children}
     </IntelContext.Provider>
