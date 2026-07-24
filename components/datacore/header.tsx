@@ -36,15 +36,11 @@ export default function Header({ onMenuToggle, sidebarOpen }: { onMenuToggle?: (
                 const secs = Math.floor((Date.now() - startTime) / 1000);
                 toast.success(`${count.toLocaleString()} registros insertados en ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}.`);
 
-                // 🔥 SOLUCIÓN PARA PRODUCCIÓN:
-                // Esperar a que se complete la actualización de datos en el contexto
-                await refreshData();
-
-                // Forzar una segunda actualización después de un breve retraso
-                // para asegurar que los datos se sincronicen en el entorno de Vercel
-                setTimeout(async () => {
-                    await refreshData();
-                }, 300);
+                // 🔥 RECARGAR LA PÁGINA DESPUÉS DE IMPORTAR
+                toast.info('Actualizando datos...', { duration: 2000 });
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1500);
             }
         } catch (err: any) {
             toast.error('Error al procesar: ' + (err?.message ?? 'desconocido'));
