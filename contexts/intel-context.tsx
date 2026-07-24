@@ -2,10 +2,7 @@
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 
-
 // ---- Types ----
-
-// Legacy type kept for backwards compat with lib/analysis.ts and lib/parse-excel.ts
 export interface IntelRecord {
   id: number;
   departamento: string;
@@ -98,6 +95,7 @@ interface IntelContextType {
   uniqueValues: UniqueValues;
   destroyData: () => Promise<void>;
   refreshData: () => Promise<void>;
+  refreshStats: () => Promise<StatsData | null>; // 👈 NUEVA FUNCIÓN
 }
 
 // ---- Defaults ----
@@ -138,7 +136,7 @@ function deriveUniqueValues(stats: StatsData): UniqueValues {
 
 export function IntelProvider({ children }: { children: React.ReactNode }) {
   const [isDataLoaded, setIsDataLoaded] = useState(false);
-  const [isLoading, setIsLoading] = useState(true); // start true for initial check
+  const [isLoading, setIsLoading] = useState(true);
   const [filters, setFiltersRaw] = useState<Filters>(defaultFilters);
   const [stats, setStats] = useState<StatsData | null>(null);
   const [mapPoints, setMapPoints] = useState<MapPoint[]>([]);
@@ -178,7 +176,6 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       setMapPoints(mapData.points ?? []);
       setMapInfo({ total: mapData.total ?? 0, displayed: mapData.displayed ?? 0 });
 
-      // On initial load (no filters), store unique values for dropdowns
       if (isInitial) {
         setUniqueValues(deriveUniqueValues(statsData));
       }
@@ -189,6 +186,29 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       if (!controller.signal.aborted) setIsLoading(false);
     }
   }, []);
+
+  // 🔥 NUEVA FUNCIÓN: Solo actualiza las estadísticas sin recargar todo
+  const refreshStats = useCallback(async (): Promise<StatsData | null> => {
+    try {
+      const params = buildParams(filters);
+      const response = await fetch(`/api/intel/stats?${params}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      
+      if (response.ok) {
+        const statsData: StatsData = await response.json();
+        setStats(statsData);
+        // También actualizar uniqueValues si es necesario
+        setUniqueValues(deriveUniqueValues(statsData));
+        return statsData;
+      }
+      return null;
+    } catch (error) {
+      console.error('Error refreshing stats:', error);
+      return null;
+    }
+  }, [filters]);
 
   // Check for existing data on mount
   useEffect(() => {
@@ -238,6 +258,7 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       isDataLoaded, isLoading, filters, setFilters,
       stats, mapPoints, mapInfo, uniqueValues,
       destroyData, refreshData,
+      refreshStats, // 👈 EXPORTAMOS LA NUEVA FUNCIÓN
     }}>
       {children}
     </IntelContext.Provider>
