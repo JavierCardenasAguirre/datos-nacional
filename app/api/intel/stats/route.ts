@@ -109,7 +109,7 @@ export async function GET(req: NextRequest) {
         municipiosCount: municipios.length,
       });
 
-      return NextResponse.json({
+      const data = {
         totalCount: total,
         tipologias,
         fenomenos: d.fenomenos ?? [],
@@ -128,7 +128,14 @@ export async function GET(req: NextRequest) {
         municipiosByDept,
         source: 'rpc',
         partial: false,
-      });
+      };
+
+      // 🔥 RESPONDE CON HEADERS ANTI-CACHÉ
+      const response = NextResponse.json(data);
+      response.headers.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
+      response.headers.set('Pragma', 'no-cache');
+      response.headers.set('Expires', '0');
+      return response;
     }
 
     // Si el error NO es "función inexistente", lo propagamos.
@@ -138,12 +145,23 @@ export async function GET(req: NextRequest) {
 
     // =====================================================================
     // 2) RESPALDO: la función SQL no está instalada -> muestreo acotado
-    //    (evita quedarnos en "Base de datos vacía" antes de correr el SQL)
     // =====================================================================
-    return await fallbackSample(req, filters, sb);
+    const fallbackData = await fallbackSample(req, filters, sb);
+    
+    // 🔥 RESPONDE CON HEADERS ANTI-CACHÉ TAMBIÉN PARA FALLBACK
+    const response = NextResponse.json(fallbackData);
+    response.headers.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
+    response.headers.set('Pragma', 'no-cache');
+    response.headers.set('Expires', '0');
+    return response;
+
   } catch (err: any) {
     console.error('Stats error:', err);
-    return NextResponse.json({ error: err?.message }, { status: 500 });
+    const response = NextResponse.json({ error: err?.message }, { status: 500 });
+    response.headers.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
+    response.headers.set('Pragma', 'no-cache');
+    response.headers.set('Expires', '0');
+    return response;
   }
 }
 
@@ -172,10 +190,6 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
   for (let b = 0; b < FALLBACK_MAX_PAGES; b += FALLBACK_PARALLEL) {
     const promises: Promise<any>[] = [];
     for (let p = b; p < Math.min(b + FALLBACK_PARALLEL, FALLBACK_MAX_PAGES); p++) {
-      // Orden DESCENDENTE por id: así el respaldo lee primero los registros
-      // MÁS RECIENTES (donde están las tipologías recién pegadas, p. ej.
-      // PROTESTA SOCIAL VIOLENTA), garantizando que aparezcan aunque no se
-      // alcance a leer toda la tabla. (El conteo exacto lo da la función SQL.)
       let q = sb.from('intel_records')
         .select('departamento, municipio, tipologia, fenomeno_criminalidad, estructura, respuesta_accion, accion_enemiga, fecha, genero')
         .range(p * PAGE_SIZE, (p + 1) * PAGE_SIZE - 1)
@@ -227,7 +241,7 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
         }
       }
     }
-    if (!gotAny) break; // no hay más filas
+    if (!gotAny) break;
   }
 
   const topN = (map: Record<string, number>, n = 300): NC[] =>
@@ -264,7 +278,7 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
 
   const partial = sampled < totalForCalc;
 
-  return NextResponse.json({
+  return {
     totalCount: totalForCalc,
     tipologias,
     fenomenos: topN(fieldCounts.fenomeno_criminalidad),
@@ -285,5 +299,5 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     partial,
     sampled,
     setupRequired: true,
-  });
+  };
 }
