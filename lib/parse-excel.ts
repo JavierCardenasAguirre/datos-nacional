@@ -88,8 +88,20 @@ function safeStr(val: any, maxLen: number = 0): string {
 
 function safeNum(val: any): number {
   if (val == null) return 0;
-  const s = String(val).trim();
+  let s = String(val).trim();
+  if (s === '') return 0;
   if (s.startsWith('=')) return NaN;
+  // IMPORTANTE: los datos vienen en formato es-CO, donde la COMA es el separador
+  // decimal (ej. "7,753888889"). `parseFloat` corta en la coma y devolvía 7, lo
+  // que colapsaba TODAS las coordenadas a grados enteros (por eso se apilaban en
+  // un solo punto del mapa). Aquí normalizamos la coma a punto antes de parsear.
+  if (s.includes(',') && !s.includes('.')) {
+    // "7,7538"  ->  "7.7538"   (coma = separador decimal)
+    s = s.replace(/,/g, '.');
+  } else if (s.includes(',') && s.includes('.')) {
+    // "1.234,56" -> la coma es decimal y el punto es separador de miles
+    s = s.replace(/\./g, '').replace(',', '.');
+  }
   const n = parseFloat(s);
   return isNaN(n) ? 0 : n;
 }
