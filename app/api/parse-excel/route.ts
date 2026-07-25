@@ -87,10 +87,29 @@ function pd(val: any): string {
     return '';
   }
   if (typeof val === 'string') {
-    if (val.startsWith('=')) return '';
-    const p = new Date(val);
+    const t = val.trim();
+    if (t.startsWith('=')) return '';
+    
+    // Formato con mes abreviado en español: DD-MMM-YY o DD-MMM-AAAA (p. ej. "20-abr-21")
+    const monthMap: Record<string, string> = {
+      'ene': '01', 'feb': '02', 'mar': '03', 'abr': '04', 'may': '05', 'jun': '06',
+      'jul': '07', 'ago': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dic': '12'
+    };
+    const mAbbrev = t.match(/^(\d{1,2})[/\-.]([a-zñ]{3})[/\-.](\d{2,4})$/i);
+    if (mAbbrev) {
+      const dy = mAbbrev[1] ?? '';
+      const monthAbbr = (mAbbrev[2] ?? '').toLowerCase();
+      const yr = mAbbrev[3] ?? '';
+      const mo = monthMap[monthAbbr];
+      if (mo) {
+        const fullYear = yr.length === 2 ? `20${yr}` : yr;
+        return `${fullYear.padStart(4, '0')}-${mo}-${dy.padStart(2, '0')}`;
+      }
+    }
+    
+    const p = new Date(t);
     if (!isNaN(p.getTime())) return p.toISOString().split('T')[0] ?? '';
-    return val;
+    return t;
   }
   return '';
 }

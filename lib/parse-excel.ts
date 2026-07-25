@@ -28,6 +28,24 @@ function parseDate(val: any): string {
   if (typeof val === 'string') {
     const t = val.trim();
     if (t.startsWith('=')) return '';
+    
+    // Formato con mes abreviado en español: DD-MMM-YY o DD-MMM-AAAA (p. ej. "20-abr-21")
+    const monthMap: Record<string, string> = {
+      'ene': '01', 'feb': '02', 'mar': '03', 'abr': '04', 'may': '05', 'jun': '06',
+      'jul': '07', 'ago': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dic': '12'
+    };
+    const mAbbrev = t.match(/^(\d{1,2})[/\-.]([a-zñ]{3})[/\-.](\d{2,4})$/i);
+    if (mAbbrev) {
+      const dy = mAbbrev[1] ?? '';
+      const monthAbbr = (mAbbrev[2] ?? '').toLowerCase();
+      const yr = mAbbrev[3] ?? '';
+      const mo = monthMap[monthAbbr];
+      if (mo) {
+        const fullYear = yr.length === 2 ? `20${yr}` : yr;
+        return `${fullYear.padStart(4, '0')}-${mo}-${dy.padStart(2, '0')}`;
+      }
+    }
+    
     // Número de serie de Excel (p. ej. 44168 = fecha). Al copiar desde Excel la
     // fecha suele venir ya formateada, pero si llega el serial lo convertimos.
     // Rango 20000-60000 ≈ años 1954-2064; así no confundimos un año de 4 dígitos.
