@@ -16,7 +16,7 @@ import { normalizeTipologia } from '@/lib/text-normalization';
 // el dashboard no se vea vacío, marcándolo como parcial.
 
 const PAGE_SIZE = 1000;      // límite real de PostgREST
-const FALLBACK_MAX_PAGES = 40; // muestra hasta 40.000 filas si falta la función SQL
+const FALLBACK_MAX_PAGES = 500; // muestra hasta 500.000 filas si falta la función SQL
 const FALLBACK_PARALLEL = 8;
 
 const DAY_NAMES = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
