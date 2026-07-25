@@ -91,23 +91,15 @@ export default function Dashboard() {
           )}
 
           <div className="p-3">
-            {/* ADVERTENCIA: datos parciales (la función SQL no respondió a tiempo) */}
+            {/* AVISO DISCRETO: datos parciales (solo si la agregación exacta no respondió) */}
             {stats?.source === 'fallback' && (
-              <div className="mb-4 rounded-xl border border-amber-500/50 bg-amber-500/10 p-3">
-                <div className="flex items-start gap-2">
-                  <div className="mt-0.5 w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
-                  <div className="text-xs text-amber-200 leading-relaxed">
-                    <span className="font-semibold text-amber-300">DATOS PARCIALES.</span>{' '}
-                    Los conteos por tipología/fenómeno mostrados abajo están{' '}
-                    <span className="font-semibold">calculados sobre una muestra</span>
-                    {typeof stats.sampled === 'number' ? ` (~${stats.sampled.toLocaleString()} registros)` : ''}
-                    {' '}y pueden quedar por debajo de las cifras reales. El{' '}
-                    <span className="font-semibold">total de eventos sí es exacto</span>.
-                    {stats.setupRequired
-                      ? ' Para ver todos los desgloses exactos, ejecuta el archivo SUPABASE_SETUP.sql en el editor SQL de Supabase (una sola vez).'
-                      : ''}
-                  </div>
-                </div>
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-slate-600/40 bg-slate-800/60 px-3 py-1.5 text-[11px] text-slate-400">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0" />
+                <span>
+                  Desgloses en modo estimado
+                  {typeof stats.sampled === 'number' ? ` (muestra de ~${stats.sampled.toLocaleString()})` : ''}
+                  {' · '}el total de eventos es exacto.
+                </span>
               </div>
             )}
             {/* GRÁFICOS */}

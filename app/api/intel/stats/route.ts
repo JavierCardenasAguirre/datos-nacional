@@ -1,8 +1,8 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// Vercel: da margen a las consultas. En plan Hobby se limita a 10s de todos
-// modos, pero el contador se resuelve en ~1-2s con el conteo exacto ligero.
-export const maxDuration = 30;
+// Vercel: da el máximo margen posible a la consulta de agregación (la base
+// tiene 487K filas). Si tu plan permite menos, Vercel lo recorta solo.
+export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase, getServiceSupabase } from '@/lib/supabase';
@@ -149,12 +149,11 @@ export async function GET(req: NextRequest) {
     // =====================================================================
     const rpcArgs = buildRpcArgs(filters);
 
-    // Con la función SQL optimizada (columna `tipologia_norm` + índices +
-    // work_mem, ver SUPABASE_SETUP.sql) la agregación baja de ~22s a pocos
-    // segundos. Le damos hasta 9.5s (por debajo del tope de 10s de Vercel Hobby)
-    // para recibir los TOTALES EXACTOS; solo si aún así no responde, caemos al
-    // respaldo por muestreo (que se marca como parcial).
-    const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 9500);
+    // La agregación exacta sobre 487K filas tarda ~22s (o ~3-5s si ya instalaste
+    // la versión optimizada de SUPABASE_SETUP.sql). Le damos hasta 25s —dentro
+    // del maxDuration=60— para recibir SIEMPRE los TOTALES EXACTOS. Solo si ni
+    // así responde caemos al respaldo por muestreo (marcado como parcial).
+    const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 25000);
 
     if (rpc && !rpc.error && rpc.data) {
       const d: any = rpc.data;
