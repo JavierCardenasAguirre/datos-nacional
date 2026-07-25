@@ -18,6 +18,7 @@ import { normalizeTipologia } from '@/lib/text-normalization';
 const PAGE_SIZE = 1000;      // límite real de PostgREST
 const FALLBACK_MAX_PAGES = 500; // muestra hasta 500.000 filas si falta la función SQL
 const FALLBACK_PARALLEL = 8;
+const FALLBACK_TIME_BUDGET_MS = 8000; // evita timeout de Vercel cuando no está la función SQL
 
 const DAY_NAMES = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MONTH_NAMES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -266,7 +267,15 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
   const deptMuniMap: Record<string, Set<string>> = {};
 
   let sampled = 0;
+  const fallbackStart = Date.now();
+  let truncatedByTimeBudget = false;
+
   for (let b = 0; b < FALLBACK_MAX_PAGES; b += FALLBACK_PARALLEL) {
+    if (Date.now() - fallbackStart >= FALLBACK_TIME_BUDGET_MS) {
+      truncatedByTimeBudget = true;
+      break;
+    }
+
     const promises: Promise<any>[] = [];
     for (let p = b; p < Math.min(b + FALLBACK_PARALLEL, FALLBACK_MAX_PAGES); p++) {
       let q = sb.from('intel_records')
@@ -276,13 +285,17 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
       q = applyFilters(q, filters);
       promises.push(Promise.resolve(q));
     }
+
     const results = await Promise.all(promises);
     let gotAny = false;
+
     for (const { data, error } of results) {
       if (error) { console.error('Fallback page error:', error.message); continue; }
       if (!data || data.length === 0) continue;
+
       gotAny = true;
       sampled += data.length;
+
       for (const r of data) {
         for (const field of Object.keys(fieldCounts)) {
           const val = (r as any)[field];
@@ -293,12 +306,14 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
             if (nv) fieldCounts[field][nv] = (fieldCounts[field][nv] || 0) + 1;
           }
         }
+
         const dept = (r as any).departamento;
         const muni = (r as any).municipio;
         if (dept && muni) {
           if (!deptMuniMap[dept]) deptMuniMap[dept] = new Set();
           deptMuniMap[dept].add(muni);
         }
+
         const f = (r as any).fecha;
         if (f) {
           const fs2 = String(f);
@@ -312,6 +327,7 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
             }
           } catch {}
         }
+
         const fen = (r as any).fenomeno_criminalidad;
         const est = (r as any).estructura;
         if (fen && est) {
@@ -320,7 +336,12 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
         }
       }
     }
+
     if (!gotAny) break;
+    if (Date.now() - fallbackStart >= FALLBACK_TIME_BUDGET_MS) {
+      truncatedByTimeBudget = true;
+      break;
+    }
   }
 
   const topN = (map: Record<string, number>, n = 300): NC[] =>
@@ -378,5 +399,6 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     partial,
     sampled,
     setupRequired: true,
+    truncatedByTimeBudget,
   };
 }

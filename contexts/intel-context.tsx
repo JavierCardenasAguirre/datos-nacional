@@ -135,6 +135,22 @@ function deriveUniqueValues(stats: StatsData): UniqueValues {
   };
 }
 
+async function parseJsonResponse<T>(response: Response, endpoint: string): Promise<T> {
+  const raw = await response.text();
+
+  if (!response.ok) {
+    const shortBody = raw.slice(0, 220);
+    throw new Error(`${endpoint} HTTP ${response.status}: ${shortBody}`);
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const shortBody = raw.slice(0, 220);
+    throw new Error(`${endpoint} devolvió una respuesta no JSON: ${shortBody}`);
+  }
+}
+
 export function IntelProvider({ children }: { children: React.ReactNode }) {
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -176,8 +192,8 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       ]);
       if (controller.signal.aborted) return;
 
-      const statsData: StatsData = await statsRes.json();
-      const mapData = await mapRes.json();
+      const statsData = await parseJsonResponse<StatsData>(statsRes, '/api/intel/stats');
+      const mapData = await parseJsonResponse<{ points?: MapPoint[]; total?: number; displayed?: number }>(mapRes, '/api/intel/map-points');
       if (controller.signal.aborted) return;
 
       setStats(statsData);
@@ -209,16 +225,12 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
           'Pragma': 'no-cache',
         },
       });
-      
-      if (response.ok) {
-        const statsData: StatsData = await response.json();
-        console.log('📊 Stats actualizados:', statsData.totalCount);
-        setStats(statsData);
-        setUniqueValues(deriveUniqueValues(statsData));
-        return statsData;
-      }
-      console.error('❌ Error en refreshStats:', response.status);
-      return null;
+
+      const statsData = await parseJsonResponse<StatsData>(response, '/api/intel/stats');
+      console.log('📊 Stats actualizados:', statsData.totalCount);
+      setStats(statsData);
+      setUniqueValues(deriveUniqueValues(statsData));
+      return statsData;
     } catch (error) {
       console.error('❌ Error refreshing stats:', error);
       return null;
@@ -239,17 +251,12 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
           'Pragma': 'no-cache',
         },
       });
-      
-      if (response.ok) {
-        const statsData: StatsData = await response.json();
-        console.log('📊 Contador actualizado:', statsData.totalCount);
-        setStats(statsData);
-        setUniqueValues(deriveUniqueValues(statsData));
-        return statsData;
-      } else {
-        console.error('❌ Error en forceUpdateCounter:', response.status);
-        return null;
-      }
+
+      const statsData = await parseJsonResponse<StatsData>(response, '/api/intel/stats');
+      console.log('📊 Contador actualizado:', statsData.totalCount);
+      setStats(statsData);
+      setUniqueValues(deriveUniqueValues(statsData));
+      return statsData;
     } catch (error) {
       console.error('❌ Error forzando actualización:', error);
       return null;
