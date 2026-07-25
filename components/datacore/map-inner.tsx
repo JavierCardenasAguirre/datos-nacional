@@ -100,11 +100,45 @@ export default function MapInner() {
     const layerGroup = L.layerGroup();
     const points = mapPoints ?? [];
 
+    // --- DISPERSIÓN (jitter) de puntos apilados -------------------------------
+    // Algunos registros del origen traen coordenadas con precisión de solo
+    // GRADOS (sin minutos/segundos), así que decenas de incidentes caen EXACTO
+    // en el mismo punto y se veía un único marcador. Para que se puedan ver y
+    // contar todos, a los que comparten la misma coordenada les aplicamos un
+    // pequeño desplazamiento determinista en espiral alrededor del punto real.
+    const keyOf = (lat: number, lon: number) => `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    const groupCounts = new Map<string, number>();
     for (const pt of points) {
-      const lat = pt.latitud;
-      const lon = pt.longitud;
+      const lat = pt.latitud, lon = pt.longitud;
       if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) continue;
       if (lat === 0 && lon === 0) continue;
+      const k = keyOf(lat, lon);
+      groupCounts.set(k, (groupCounts.get(k) ?? 0) + 1);
+    }
+    const groupIndex = new Map<string, number>();
+    const GOLDEN_ANGLE = 2.399963229728653; // radianes (~137.5°): reparte parejo
+    const JITTER_STEP = 0.012;               // ~1.3 km por "anillo" de la espiral
+
+    for (const pt of points) {
+      const baseLat = pt.latitud;
+      const baseLon = pt.longitud;
+      if (baseLat == null || baseLon == null || isNaN(baseLat) || isNaN(baseLon)) continue;
+      if (baseLat === 0 && baseLon === 0) continue;
+
+      let lat = baseLat;
+      let lon = baseLon;
+      const k = keyOf(baseLat, baseLon);
+      if ((groupCounts.get(k) ?? 0) > 1) {
+        const idx = groupIndex.get(k) ?? 0;
+        groupIndex.set(k, idx + 1);
+        // Espiral de Fermat: radio ~ sqrt(idx) para densidad uniforme.
+        const radius = JITTER_STEP * Math.sqrt(idx);
+        const angle = idx * GOLDEN_ANGLE;
+        lat = baseLat + radius * Math.cos(angle);
+        // corrige el achatamiento por longitud según la latitud
+        const cosLat = Math.cos((baseLat * Math.PI) / 180) || 1;
+        lon = baseLon + (radius * Math.sin(angle)) / cosLat;
+      }
 
       const color = getColor(pt.tipologia ?? '');
 

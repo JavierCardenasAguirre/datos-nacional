@@ -149,10 +149,12 @@ export async function GET(req: NextRequest) {
     // =====================================================================
     const rpcArgs = buildRpcArgs(filters);
 
-    // La función pesada puede tardar ~25s sobre 487K filas. La corremos "contra
-    // reloj": si no responde en 6s la abandonamos y usamos el respaldo, de modo
-    // que la petición SIEMPRE termina dentro del límite de Vercel.
-    const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 6000);
+    // Con la función SQL optimizada (columna `tipologia_norm` + índices +
+    // work_mem, ver SUPABASE_SETUP.sql) la agregación baja de ~22s a pocos
+    // segundos. Le damos hasta 9.5s (por debajo del tope de 10s de Vercel Hobby)
+    // para recibir los TOTALES EXACTOS; solo si aún así no responde, caemos al
+    // respaldo por muestreo (que se marca como parcial).
+    const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 9500);
 
     if (rpc && !rpc.error && rpc.data) {
       const d: any = rpc.data;

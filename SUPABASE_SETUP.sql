@@ -1,10 +1,10 @@
 -- ============================================================================
---  DATACORE INTEL  ·  Función de estadísticas del dashboard
+--  DATACORE INTEL  ·  Estadísticas del dashboard (versión optimizada)
 -- ============================================================================
 --  QUÉ HACE:
 --    Calcula TODOS los conteos del dashboard (tipologías, fenómenos, mapas,
 --    líneas de tiempo, etc.) directamente dentro de la base de datos, sobre
---    los 487.000+ registros, en menos de 1 segundo.
+--    los 487.000+ registros.
 --
 --  POR QUÉ ES NECESARIA:
 --    La API de Supabase solo devuelve 1.000 filas por petición, así que era
@@ -12,18 +12,68 @@
 --    servidor web. Esta función agrupa y cuenta DENTRO de Postgres y devuelve
 --    solo el resultado ya resumido (unos pocos KB).
 --
---  ¿ES SEGURA? SÍ. ES 100% DE SOLO LECTURA.
---    Únicamente hace SELECT / GROUP BY. NO tiene INSERT, UPDATE, DELETE ni
---    DROP. No modifica, no borra y no mueve ninguna columna ni fila.
---    Puedes ejecutarla sin ningún riesgo para tus datos.
+--  QUÉ CAMBIÓ EN ESTA VERSIÓN (por qué antes salían totales equivocados):
+--    Antes la función tardaba ~22 segundos y Vercel la cancelaba a los pocos
+--    segundos, así que el dashboard caía a un "modo respaldo" que solo alcanza
+--    a leer una parte de las filas -> mostraba totales INCORRECTOS (por debajo
+--    de lo real) como si fueran definitivos.
+--    Ahora:
+--      1) Se guarda la tipología ya normalizada en una columna fija
+--         (`tipologia_norm`), en vez de recalcular tildes/mayúsculas sobre las
+--         487K filas en cada consulta.
+--      2) Se crean índices para agrupar y filtrar mucho más rápido.
+--      3) La función usa más memoria de trabajo (work_mem) para no volcar a
+--         disco. Con esto la consulta baja de ~22s a pocos segundos y Vercel
+--         alcanza a recibir los TOTALES EXACTOS.
 --
---  CÓMO INSTALARLA (una sola vez):
+--  ¿ES SEGURA?
+--    El PASO 1 agrega UNA columna calculada (no borra ni cambia tus datos) y
+--    crea índices (solo aceleran las consultas). Los PASOS 2 y 3 son funciones
+--    100% de SOLO LECTURA (solo SELECT / GROUP BY). No hay DELETE ni DROP de
+--    datos. Puedes ejecutarlo con tranquilidad.
+--
+--  CÓMO INSTALARLO (una sola vez):
 --    1. Entra a tu proyecto en https://supabase.com
 --    2. Menú izquierdo  ->  "SQL Editor"  ->  "New query"
 --    3. Pega TODO este archivo y pulsa "Run" (o Ctrl+Enter)
---    4. Debe decir "Success. No rows returned". Listo.
+--    4. El PASO 1 puede tardar hasta ~1-2 minutos (está recorriendo las 487K
+--       filas para llenar la columna nueva). Es normal. Al final debe decir
+--       "Success". Listo.
 -- ============================================================================
 
+
+-- ============================================================================
+--  PASO 1 · MIGRACIÓN (una sola vez): columna normalizada + índices
+-- ============================================================================
+--  `tipologia_norm` guarda la tipología ya en MAYÚSCULAS, sin tildes/ñ y con
+--  espacios colapsados. Se llena SOLA (columna GENERADA) tanto para las filas
+--  actuales como para todo lo que se importe en el futuro. Así la app deja de
+--  gastar tiempo normalizando 487K filas en cada consulta.
+alter table public.intel_records
+  add column if not exists tipologia_norm text
+  generated always as (
+    upper(btrim(regexp_replace(
+      translate(coalesce(tipologia, ''),
+        'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
+        'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
+      '\s+', ' ', 'g')))
+  ) stored;
+
+-- Índices para agrupar/filtrar rápido (solo aceleran; no cambian datos).
+create index if not exists idx_intel_tipologia_norm on public.intel_records (tipologia_norm);
+create index if not exists idx_intel_fecha          on public.intel_records (fecha);
+create index if not exists idx_intel_departamento   on public.intel_records (departamento);
+create index if not exists idx_intel_municipio      on public.intel_records (municipio);
+create index if not exists idx_intel_fenomeno       on public.intel_records (fenomeno_criminalidad);
+create index if not exists idx_intel_estructura     on public.intel_records (estructura);
+
+-- Deja las estadísticas del planificador al día tras crear la columna/índices.
+analyze public.intel_records;
+
+
+-- ============================================================================
+--  PASO 2 · FUNCIÓN DE ESTADÍSTICAS DEL DASHBOARD  ·  intel_dashboard_stats
+-- ============================================================================
 create or replace function public.intel_dashboard_stats(
   p_fecha_inicio text default null,
   p_fecha_fin    text default null,
@@ -38,24 +88,19 @@ language sql
 stable
 security definer
 set search_path = public
--- Sube el límite de tiempo SOLO para esta función (los 487K registros pueden
--- tardar unos segundos). Sin esto, Supabase cancela la consulta (timeout) y el
--- dashboard cae al modo respaldo, que no alcanza a ver las tipologías nuevas.
+-- Sube el límite de tiempo SOLO para esta función.
 set statement_timeout = '120s'
+-- Más memoria de trabajo para que los GROUP BY / sort NO se vuelquen a disco
+-- (esto era gran parte de los ~22s). Aplica solo mientras corre la función.
+set work_mem = '256MB'
 as $$
-  -- MATERIALIZED: la normalización (tildes/mayúsculas) se calcula UNA sola vez
-  -- y se reutiliza en todos los conteos. Antes se recalculaba ~13 veces sobre
-  -- las 487K filas, que era justo lo que causaba el timeout.
+  -- La normalización ya viene lista en la columna `tipologia_norm`, así que el
+  -- CTE base solo SELECCIONA columnas (sin recalcular tildes/mayúsculas).
   with base as materialized (
     select
       departamento,
       municipio,
-      -- Normaliza tipología: mayúsculas, sin tildes/ñ, espacios colapsados
-      upper(btrim(regexp_replace(
-        translate(coalesce(tipologia, ''),
-          'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
-          'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
-        '\s+', ' ', 'g'))) as tipologia_norm,
+      tipologia_norm,
       fenomeno_criminalidad,
       estructura,
       respuesta_accion,
@@ -70,13 +115,12 @@ as $$
       and (p_municipio    is null or municipio    = p_municipio)
       and (p_fenomeno     is null or fenomeno_criminalidad = p_fenomeno)
       and (p_estructura   is null or estructura   = p_estructura)
-      and (p_tipologia is null or
-           upper(btrim(regexp_replace(
-             translate(coalesce(tipologia, ''),
-               'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
-               'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
-             '\s+', ' ', 'g')))
-           = upper(btrim(p_tipologia)))
+      and (p_tipologia is null or tipologia_norm =
+            upper(btrim(regexp_replace(
+              translate(coalesce(p_tipologia, ''),
+                'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
+                'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
+              '\s+', ' ', 'g'))))
   )
   select json_build_object(
     'totalCount', (select count(*) from base),
@@ -144,28 +188,10 @@ grant execute on function public.intel_dashboard_stats(text,text,text,text,text,
 
 
 -- ============================================================================
---  FUNCIÓN LIGERA DE CONTEO EXACTO  ·  intel_count
+--  PASO 3 · FUNCIÓN LIGERA DE CONTEO EXACTO  ·  intel_count
 -- ============================================================================
---  QUÉ HACE:
---    Devuelve el número EXACTO de registros (con los mismos filtros del
---    dashboard) en milisegundos. Solo hace `count(*)`, nada más.
---
---  POR QUÉ ES NECESARIA:
---    El "contador de eventos" del dashboard NO puede usar el conteo ESTIMADO
---    de Postgres, porque ese estimado se basa en estadísticas del planificador
---    que solo se actualizan cada cierto tiempo (autovacuum/ANALYZE). Por eso,
---    al pegar una fila nueva, el dato llegaba a Supabase pero el contador NO
---    cambiaba hasta que Postgres refrescara sus estadísticas.
---
---    La función grande `intel_dashboard_stats` sí da el conteo exacto, pero
---    tarda ~25s sobre 487.000 filas y Vercel corta las funciones a los ~10s.
---    Esta función es minúscula y responde al instante, así que el contador
---    siempre queda EXACTO y ACTUALIZADO, incluso en producción (Vercel).
---
---  ¿ES SEGURA? SÍ. ES 100% DE SOLO LECTURA (solo SELECT count(*)).
---    No modifica, no borra y no mueve ninguna fila ni columna.
--- ============================================================================
-
+--  Devuelve el número EXACTO de registros (con los mismos filtros del
+--  dashboard) en milisegundos. Solo hace `count(*)`. 100% de SOLO LECTURA.
 create or replace function public.intel_count(
   p_fecha_inicio text default null,
   p_fecha_fin    text default null,
@@ -191,13 +217,12 @@ as $$
     and (p_municipio    is null or municipio    = p_municipio)
     and (p_fenomeno     is null or fenomeno_criminalidad = p_fenomeno)
     and (p_estructura   is null or estructura   = p_estructura)
-    and (p_tipologia is null or
-         upper(btrim(regexp_replace(
-           translate(coalesce(tipologia, ''),
-             'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
-             'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
-           '\s+', ' ', 'g')))
-         = upper(btrim(p_tipologia)));
+    and (p_tipologia is null or tipologia_norm =
+          upper(btrim(regexp_replace(
+            translate(coalesce(p_tipologia, ''),
+              'áéíóúàèìòùäëïöüÁÉÍÓÚÀÈÌÒÙÄËÏÖÜñÑ',
+              'aeiouaeiouaeiouAEIOUAEIOUAEIOUnN'),
+            '\s+', ' ', 'g'))));
 $$;
 
 grant execute on function public.intel_count(text,text,text,text,text,text,text) to anon, authenticated, service_role;

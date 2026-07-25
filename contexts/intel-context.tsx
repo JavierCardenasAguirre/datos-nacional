@@ -60,6 +60,15 @@ export interface StatsData {
   riskScore: number;
   recomendaciones: string[];
   municipiosByDept: Record<string, string[]>;
+  // Estado de la respuesta: 'rpc' = totales EXACTOS (función SQL); 'fallback' =
+  // muestreo parcial (la función SQL no respondió a tiempo -> números por debajo
+  // de lo real). Se usa para advertir en pantalla y no presentar cifras
+  // parciales como definitivas.
+  source?: 'rpc' | 'fallback';
+  partial?: boolean;
+  setupRequired?: boolean;
+  truncatedByTimeBudget?: boolean;
+  sampled?: number;
 }
 
 export interface MapPoint {
