@@ -141,7 +141,7 @@ export async function GET(req: NextRequest) {
         const sb = getServiceSupabase();
 
         // 1. Llamada directa a la función SQL (sin abortSignal para evitar errores ocultos)
-        const rpcArgs = buildRpcArgs(filters);
+        //const rpcArgs = buildRpcArgs(filters);
         const rpc = await sb.rpc('get_dashboard_stats_final');
 
         // Si la RPC funciona, usamos sus datos exactos
