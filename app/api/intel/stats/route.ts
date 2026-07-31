@@ -142,7 +142,7 @@ export async function GET(req: NextRequest) {
 
         // 1. Llamada directa a la función SQL (sin abortSignal para evitar errores ocultos)
         const rpcArgs = buildRpcArgs(filters);
-        const rpc = await sb.rpc('intel_dashboard_stats', rpcArgs);
+        const rpc = await sb.rpc('get_dashboard_stats_final');
 
         // Si la RPC funciona, usamos sus datos exactos
         if (rpc && !rpc.error && rpc.data) {
