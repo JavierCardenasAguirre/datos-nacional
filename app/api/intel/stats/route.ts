@@ -140,14 +140,12 @@ export async function GET(req: NextRequest) {
         const filters = parseFilters(req.nextUrl.searchParams);
         const sb = getServiceSupabase();
 
-        // 1. Llamada directa a la función SQL (sin abortSignal para evitar errores ocultos)
-        //const rpcArgs = buildRpcArgs(filters);
+        // 1. Llamada directa a la función SQL
         const rpc = await sb.rpc('get_dashboard_stats_final');
 
         // Si la RPC funciona, usamos sus datos exactos
         if (rpc && !rpc.error && rpc.data) {
             let rawData: any = rpc.data;
-            // A veces Supabase devuelve el JSON dentro de un array
             if (Array.isArray(rawData) && rawData.length > 0) {
                 rawData = rawData[0];
             }
@@ -204,20 +202,10 @@ export async function GET(req: NextRequest) {
             return response;
         }
 
-        // Si llegamos aquí, la RPC falló. Mostramos el error en los logs de Vercel
-        if (rpc && rpc.error) {
-            console.error('RPC stats error real:', rpc.error.message);
-        }
-
-        // 2. RESPALDO: función lenta/no instalada -> muestreo acotado.
-        const exactCount = await getExactCount(sb, filters);
-        const fallbackData = await fallbackSample(req, filters, sb, exactCount);
-
-        const response = NextResponse.json(fallbackData);
-        response.headers.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
-        response.headers.set('Pragma', 'no-cache');
-        response.headers.set('Expires', '0');
-        return response;
+        // 2. Si llegamos aquí, la RPC falló. Devolvemos el error explícito.
+        const errorMsg = rpc?.error?.message || 'La RPC no devolvió datos (posible timeout de Vercel o Supabase)';
+        console.error('RPC FALLÓ EN VERCEL:', errorMsg);
+        return NextResponse.json({ error: 'Error en base de datos: ' + errorMsg }, { status: 500 });
 
     } catch (err: any) {
         console.error('Stats error:', err);
