@@ -140,35 +140,20 @@ export async function GET(req: NextRequest) {
         const filters = parseFilters(req.nextUrl.searchParams);
         const sb = getServiceSupabase();
 
-        // El contador exacto se resuelve SIEMPRE por su cuenta (rápido) para que
-        // sea correcto pase lo que pase con la función pesada de agregación.
-        const exactCountPromise = getExactCount(sb, filters);
-
-        // =====================================================================
-        // 1) CAMINO PRINCIPAL: función SQL de agregación (rápida y exacta)
-        // =====================================================================
+        // 1. Llamada directa a la función SQL (sin abortSignal para evitar errores ocultos)
         const rpcArgs = buildRpcArgs(filters);
+        const rpc = await sb.rpc('intel_dashboard_stats', rpcArgs);
 
-        // La agregación exacta sobre 487K filas tarda ~22s (o ~3-5s si ya instalaste
-        // la versión optimizada de SUPABASE_SETUP.sql). Le damos hasta 25s —dentro
-        // del maxDuration=60— para recibir SIEMPRE los TOTALES EXACTOS. Solo si ni
-        // así responde caemos al respaldo por muestreo (marcado como parcial).
-        const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 25000);
-
+        // Si la RPC funciona, usamos sus datos exactos
         if (rpc && !rpc.error && rpc.data) {
-            // Supabase puede devolver el JSON directamente o envuelto en un array/objeto.
-            // Esto garantiza que siempre extraigamos el objeto correcto.
             let rawData: any = rpc.data;
+            // A veces Supabase devuelve el JSON dentro de un array
             if (Array.isArray(rawData) && rawData.length > 0) {
                 rawData = rawData[0];
             }
-            if (rawData && rawData.intel_dashboard_stats) {
-                rawData = rawData.intel_dashboard_stats;
-            }
             const d: any = rawData;
-            // El contador SIEMPRE usa el conteo exacto y fresco (no el de la RPC, por
-            // si sus estadísticas quedaran atrás); si falla, usa el de la RPC.
-            const exactCount = await exactCountPromise;
+
+            const exactCount = await getExactCount(sb, filters);
             const total: number = exactCount ?? d.totalCount ?? 0;
 
             const dowArr: { d: number; count: number }[] = Array.isArray(d.dow) ? d.dow : [];
@@ -212,7 +197,6 @@ export async function GET(req: NextRequest) {
                 partial: false,
             };
 
-            // 🔥 RESPONDE CON HEADERS ANTI-CACHÉ
             const response = NextResponse.json(data);
             response.headers.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
             response.headers.set('Pragma', 'no-cache');
@@ -220,20 +204,15 @@ export async function GET(req: NextRequest) {
             return response;
         }
 
-        // Si la RPC devolvió error (y no es "función inexistente"), lo registramos.
-        // `rpc === null` significa que se agotó el tiempo (6s) -> usamos respaldo.
-        if (rpc && rpc.error && !isMissingFunction(rpc.error)) {
-            console.error('RPC stats error:', rpc.error.message);
+        // Si llegamos aquí, la RPC falló. Mostramos el error en los logs de Vercel
+        if (rpc && rpc.error) {
+            console.error('RPC stats error real:', rpc.error.message);
         }
 
-        // =====================================================================
-        // 2) RESPALDO: función lenta/no instalada -> muestreo acotado.
-        //    El contador usa el conteo EXACTO (no el estimado del muestreo).
-        // =====================================================================
-        const exactCount = await exactCountPromise;
+        // 2. RESPALDO: función lenta/no instalada -> muestreo acotado.
+        const exactCount = await getExactCount(sb, filters);
         const fallbackData = await fallbackSample(req, filters, sb, exactCount);
 
-        // 🔥 RESPONDE CON HEADERS ANTI-CACHÉ TAMBIÉN PARA FALLBACK
         const response = NextResponse.json(fallbackData);
         response.headers.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
         response.headers.set('Pragma', 'no-cache');
