@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import ExcelJS from 'exceljs';
 import path from 'path';
 import fs from 'fs';
@@ -203,9 +203,96 @@ async function robustInsert(
   return { inserted: r1.inserted + r2.inserted, errors: r1.errors + r2.errors };
 }
 
+async function clearIntelRecords(sb: ReturnType<typeof getServiceSupabase>) {
+  let deleteMore = true;
+  while (deleteMore) {
+    const { data: ids, error: readError } = await sb.from('intel_records').select('id').limit(10000);
+    if (readError) throw readError;
+    if (!ids || ids.length === 0) {
+      deleteMore = false;
+      break;
+    }
+    const idList = ids.map((r: any) => r.id);
+    const { error: deleteError } = await sb.from('intel_records').delete().in('id', idList);
+    if (deleteError) throw deleteError;
+  }
+}
+
+function toSupabaseRowFromClient(r: any): Record<string, any> | null {
+  const latG = sn(r?.lat_grados) || 0;
+  const latM = sn(r?.lat_minutos) || 0;
+  const latS = sn(r?.lat_segundos) || 0;
+  const lonG = sn(r?.lon_grados) || 0;
+  const lonM = sn(r?.lon_minutos) || 0;
+  const lonS = sn(r?.lon_segundos) || 0;
+
+  let lat = sn(r?.latitud);
+  let lon = sn(r?.longitud);
+  if (isNaN(lat) || lat === 0) lat = parseDMS(latG, latM, latS, false);
+  if (isNaN(lon) || lon === 0) lon = parseDMS(lonG, lonM, lonS, true);
+  if (lat === 0 && lon === 0) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+
+  const out = {
+    departamento: ss(r?.departamento),
+    municipio: ss(r?.municipio),
+    vereda: ss(r?.vereda, 100),
+    lat_grados: latG,
+    lat_minutos: latM,
+    lat_segundos: latS,
+    lon_grados: lonG,
+    lon_minutos: lonM,
+    lon_segundos: lonS,
+    latitud: lat,
+    longitud: lon,
+    fecha: pd(r?.fecha),
+    tipologia: normalizeTipologia(ss(r?.tipologia, 200)),
+    informacion_hecho: ss(r?.informacion_hecho, 500),
+    fenomeno_criminalidad: ss(r?.fenomeno_criminalidad, 200),
+    medios: ss(r?.medios, 200),
+    genero: ss(r?.genero, 50),
+    estructura: ss(r?.estructura, 200),
+    respuesta_accion: ss(r?.respuesta_accion, 200),
+    accion_enemiga: ss(r?.accion_enemiga, 200),
+    res_tipo: ss(r?.res_tipo, 200),
+  };
+
+  if (!out.departamento && !out.municipio && !out.tipologia) return null;
+  return out;
+}
+
 export async function POST(req: NextRequest) {
   let tmpFile = '';
   try {
+    const sb = getServiceSupabase();
+    const contentType = req.headers.get('content-type') || '';
+
+    // Nuevo modo: lotes JSON desde cliente para evitar límites de payload en Vercel
+    if (contentType.includes('application/json')) {
+      const body = await req.json();
+      const clearExisting = Boolean(body?.clearExisting);
+      const rawRows = Array.isArray(body?.rows) ? body.rows : null;
+
+      if (!rawRows) {
+        return NextResponse.json({ error: 'rows requerido' }, { status: 400 });
+      }
+
+      if (clearExisting) {
+        await clearIntelRecords(sb);
+      }
+
+      const rows = rawRows
+        .map((r: any) => toSupabaseRowFromClient(r))
+        .filter((r: Record<string, any> | null): r is Record<string, any> => !!r);
+
+      if (rows.length === 0) {
+        return NextResponse.json({ success: true, inserted: 0, errors: rawRows.length });
+      }
+
+      const result = await robustInsert(sb, rows);
+      return NextResponse.json({ success: true, inserted: result.inserted, errors: result.errors });
+    }
+
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     if (!file) {
@@ -217,7 +304,6 @@ export async function POST(req: NextRequest) {
     const arrayBuffer = await file.arrayBuffer();
     const fileSizeMB = (arrayBuffer.byteLength / 1024 / 1024).toFixed(0);
 
-    const sb = getServiceSupabase();
     // Use smaller batch size to avoid Supabase REST API payload limits
     const BATCH_SIZE = 500;
     // Run multiple insert requests in parallel for speed

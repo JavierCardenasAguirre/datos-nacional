@@ -450,106 +450,25 @@ export interface ImportProgress {
   percent: number;
 }
 
-// Threshold in bytes to use server-side parsing (10 MB)
-const SERVER_PARSE_THRESHOLD = 10 * 1024 * 1024;
-
 export async function importFile(
   file: File,
   onProgress?: (progress: ImportProgress) => void,
 ): Promise<IntelRecord[]> {
   const isCSV = file?.name?.toLowerCase()?.endsWith('.csv');
-  const isLargeFile = file.size > SERVER_PARSE_THRESHOLD;
 
-  // Small CSV files: client-side SheetJS
-  if (isCSV && !isLargeFile) {
-    onProgress?.({ message: 'Leyendo archivo CSV...', percent: 30 });
-    const buffer = await file.arrayBuffer();
+  onProgress?.({ message: `Leyendo archivo (${(file.size / 1024 / 1024).toFixed(1)} MB)...`, percent: 15 });
+  const buffer = await file.arrayBuffer();
+
+  if (isCSV) {
     const text = new TextDecoder().decode(buffer);
-    onProgress?.({ message: 'Procesando CSV...', percent: 60 });
+    onProgress?.({ message: 'Procesando CSV en el navegador...', percent: 60 });
     const records = parseCSVFile(text);
-    onProgress?.({ message: 'Listo', percent: 100 });
+    onProgress?.({ message: `CSV procesado (${records.length.toLocaleString()} filas válidas)`, percent: 100 });
     return records;
   }
 
-  // Small Excel files: try client-side SheetJS first
-  if (!isCSV && !isLargeFile) {
-    onProgress?.({ message: 'Procesando archivo Excel...', percent: 30 });
-    const buffer = await file.arrayBuffer();
-    const records = parseExcelFile(buffer);
-    if (records.length > 0) {
-      onProgress?.({ message: 'Listo', percent: 100 });
-      return records;
-    }
-    // If SheetJS returned empty, fall through to server-side
-  }
-
-  // Large files or SheetJS failure: stream from server
-  const sizeMB = (file.size / 1024 / 1024).toFixed(0);
-  onProgress?.({ message: `Subiendo archivo (${sizeMB}MB) al servidor...`, percent: 2 });
-
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const response = await fetch('/api/parse-excel', {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => 'Error del servidor');
-    throw new Error(errText);
-  }
-
-  // Read NDJSON stream
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('No se pudo leer la respuesta del servidor');
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  const allRecords: IntelRecord[] = [];
-  let recordId = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    // Process complete lines
-    let newlineIdx: number;
-    while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.substring(0, newlineIdx).trim();
-      buffer = buffer.substring(newlineIdx + 1);
-      if (!line) continue;
-
-      try {
-        const msg = JSON.parse(line);
-        if (msg.t === 'p') {
-          // Progress update
-          onProgress?.({ message: msg.m ?? '', percent: msg.p ?? 0 });
-        } else if (msg.t === 'c') {
-          // Chunk of compact records
-          const rows: any[][] = msg.d ?? [];
-          for (let i = 0; i < rows.length; i++) {
-            recordId++;
-            allRecords.push(compactToRecord(rows[i], recordId));
-          }
-        } else if (msg.t === 'e') {
-          throw new Error(msg.m ?? 'Error del servidor');
-        } else if (msg.t === 'd') {
-          // Done
-          onProgress?.({ message: `${allRecords.length.toLocaleString()} registros cargados`, percent: 100 });
-        }
-      } catch (parseErr: any) {
-        if (parseErr?.message?.includes('Error')) throw parseErr;
-        // Skip malformed lines
-      }
-    }
-  }
-
-  if (allRecords.length === 0) {
-    throw new Error('No se encontraron registros válidos en el archivo.');
-  }
-
-  return allRecords;
+  onProgress?.({ message: 'Procesando Excel en el navegador...', percent: 60 });
+  const records = parseExcelFile(buffer);
+  onProgress?.({ message: `Excel procesado (${records.length.toLocaleString()} filas válidas)`, percent: 100 });
+  return records;
 }
