@@ -205,6 +205,12 @@ async function robustInsert(
 }
 
 async function clearIntelRecords(sb: ReturnType<typeof getServiceSupabase>) {
+  // Camino rápido: TRUNCATE vía RPC (ver SQL `intel_truncate`). Borrar 500k filas
+  // con DELETE por lotes de ids es muy lento y puede agotar el tiempo de la función.
+  const { error: rpcError } = await sb.rpc('intel_truncate');
+  if (!rpcError) return;
+  console.warn('intel_truncate no disponible, se usa borrado por lotes:', rpcError.message);
+
   let deleteMore = true;
   while (deleteMore) {
     const { data: ids, error: readError } = await sb.from('intel_records').select('id').limit(10000);
@@ -278,15 +284,7 @@ export async function POST(req: NextRequest) {
     (async () => {
       try {
         await sendLine({ t: 'p', m: 'Limpiando datos anteriores...', p: 1 });
-        // Delete in batches to avoid timeout on large tables
-        let deleteMore = true;
-        while (deleteMore) {
-          const { data: ids } = await sb.from('intel_records').select('id').limit(10000);
-          if (!ids || ids.length === 0) { deleteMore = false; break; }
-          const idList = ids.map((r: any) => r.id);
-          await sb.from('intel_records').delete().in('id', idList);
-          await sendLine({ t: 'p', m: `Limpiando datos anteriores (${idList.length})...`, p: 1 });
-        }
+        await clearIntelRecords(sb);
 
         let totalInserted = 0;
         let totalErrors = 0;
