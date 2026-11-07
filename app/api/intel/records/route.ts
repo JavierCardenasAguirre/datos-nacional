@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabase } from '@/lib/supabase';
-import { getSessionUser } from '@/lib/auth';
+import { requireAdmin } from '@/lib/auth';
 import { normalizeTipologia, normalizeText } from '@/lib/text-normalization';
 
 // Parsea un número aceptando la COMA como separador decimal (formato es-CO).
@@ -42,8 +42,8 @@ function resolveCoord(decRaw: any, g: number, m: number, s: number, isLon: boole
 }
 
 export async function POST(req: NextRequest) {
-  const user = await getSessionUser();
-  if (!user || user.role !== 'admin') {
+  const user = await requireAdmin();
+  if (!user) {
     return NextResponse.json({ error: 'Solo administradores pueden agregar registros' }, { status: 403 });
   }
 

@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
+import { requireAdmin } from '@/lib/auth';
 import { NextRequest, NextResponse } from 'next/server';
 import ExcelJS from 'exceljs';
 import path from 'path';
@@ -226,6 +227,9 @@ async function clearIntelRecords(sb: ReturnType<typeof getServiceSupabase>) {
 }
 
 export async function POST(req: NextRequest) {
+  if (!(await requireAdmin())) {
+    return NextResponse.json({ error: 'Solo el administrador puede importar datos' }, { status: 403 });
+  }
   let tmpFile = '';
   try {
     const sb = getServiceSupabase();

@@ -1,13 +1,13 @@
 export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getSessionUser } from '@/lib/auth';
+import { requireAdmin, isAdminEmail, effectiveRole } from '@/lib/auth';
 import { getServiceSupabase } from '@/lib/supabase';
 
 // GET: List all users (admin only)
 export async function GET(req: NextRequest) {
-  const user = await getSessionUser();
-  if (!user || user.role !== 'admin') {
+  const user = await requireAdmin();
+  if (!user) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 403 });
   }
 
@@ -20,13 +20,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ users: data ?? [] });
+  // El rol mostrado es el efectivo: solo el administrador único aparece como ADMIN.
+  const users = (data ?? []).map((u: any) => ({ ...u, role: effectiveRole(u.email, u.role) }));
+  return NextResponse.json({ users });
 }
 
 // PATCH: Update user status (approve/reject)
 export async function PATCH(req: NextRequest) {
-  const currentUser = await getSessionUser();
-  if (!currentUser || currentUser.role !== 'admin') {
+  const currentUser = await requireAdmin();
+  if (!currentUser) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 403 });
   }
 
@@ -35,11 +37,24 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: 'Datos inv\u00e1lidos' }, { status: 400 });
   }
 
+  if (userId === currentUser.id) {
+    return NextResponse.json({ error: 'No puedes cambiar tu propio estado' }, { status: 400 });
+  }
+
   const sb = getServiceSupabase();
   const newStatus = action === 'approve' ? 'approved' : 'rejected';
 
+  const { data: target } = await sb.from('app_users').select('id, email').eq('id', userId).maybeSingle();
+  if (!target) {
+    return NextResponse.json({ error: 'Usuario no encontrado' }, { status: 404 });
+  }
+  if (isAdminEmail(target.email)) {
+    return NextResponse.json({ error: 'No se puede modificar al administrador' }, { status: 400 });
+  }
+
+  // Al aprobar, la cuenta queda SIEMPRE como usuario normal (nunca admin).
   const { error } = await sb.from('app_users')
-    .update({ status: newStatus })
+    .update({ status: newStatus, role: 'user' })
     .eq('id', userId);
 
   if (error) {
@@ -51,8 +66,8 @@ export async function PATCH(req: NextRequest) {
 
 // DELETE: Remove a user
 export async function DELETE(req: NextRequest) {
-  const currentUser = await getSessionUser();
-  if (!currentUser || currentUser.role !== 'admin') {
+  const currentUser = await requireAdmin();
+  if (!currentUser) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 403 });
   }
 
@@ -67,6 +82,13 @@ export async function DELETE(req: NextRequest) {
   }
 
   const sb = getServiceSupabase();
+  const { data: target } = await sb.from('app_users').select('id, email').eq('id', userId).maybeSingle();
+  if (!target) {
+    return NextResponse.json({ error: 'Usuario no encontrado' }, { status: 404 });
+  }
+  if (isAdminEmail(target.email)) {
+    return NextResponse.json({ error: 'No se puede eliminar al administrador' }, { status: 400 });
+  }
   const { error } = await sb.from('app_users').delete().eq('id', userId);
 
   if (error) {
