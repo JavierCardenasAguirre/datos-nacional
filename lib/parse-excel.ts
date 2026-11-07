@@ -393,9 +393,22 @@ const EXPECTED_COLUMNS = [
 ];
 
 const HEADER_TOKENS = [
-  'DEPARTAMENTO', 'MUNICIPIO', 'TIPOLOGIA', 'FENOMENO',
+  'DEPARTAMENTO', 'MUNICIPIO', 'TIPOLOGIA', 'FENOMENO', 'FENOMENO CRIMINALIDAD',
   'ESTRUCTURA', 'GENERO', 'RESPUESTA', 'ACCION', 'VEREDA',
+  'LAT GRADOS', 'LAT MINUTOS', 'LAT SEGUNDOS', 'LON GRADOS', 'LON MINUTOS', 'LON SEGUNDOS',
+  'LATITUD', 'LONGITUD', 'INFORMACION HECHO', 'MEDIOS', 'RES TIPO',
 ];
+
+const MAX_HEADER_SCAN_ROWS = 200;
+const MIN_HEADER_SCORE = 2;
+
+export interface SheetDiagnostic {
+  sheetName: string;
+  totalRows: number;
+  headerRowIndex: number;
+  bestHeaderScore: number;
+  previewRows: string[];
+}
 
 export interface ParseDebugInfo {
   sheetName: string;
@@ -403,6 +416,8 @@ export interface ParseDebugInfo {
   detectedHeader: string[];
   expectedColumns: string[];
   totalRowsRead: number;
+  matchedSheets?: string[];
+  sheetDiagnostics?: SheetDiagnostic[];
 }
 
 export interface ParseResult {
@@ -410,66 +425,234 @@ export interface ParseResult {
   debug: ParseDebugInfo;
 }
 
+interface HeaderScanResult {
+  headerRowIndex: number;
+  dataStartRowIndex: number;
+  headerRow: any[];
+  bestHeaderScore: number;
+  normalizedHeader: string[];
+  recognized: boolean;
+  signature: string;
+}
+
+interface ParsedSheetResult {
+  sheetName: string;
+  rows: any[][];
+  records: IntelRecord[];
+  header: HeaderScanResult;
+  diagnostic: SheetDiagnostic;
+}
+
+function extractCellValue(v: any): string {
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    const richText = (v as any).richText;
+    if (Array.isArray(richText)) {
+      return richText.map((p: any) => safeStr(p?.text)).join('');
+    }
+    if (typeof (v as any).w === 'string' && (v as any).w.trim()) return String((v as any).w);
+    if ((v as any).v != null) return String((v as any).v);
+    return safeStr(v);
+  }
+  return String(v);
+}
+
 function normalizeHeaderCell(v: any): string {
-  return safeStr(v)
+  return extractCellValue(v)
+    .replace(/\u00A0/g, ' ')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[._]+/g, ' ')
+    .replace(/\s*\/\s*/g, ' ')
+    .replace(/\s+-\s+/g, ' ')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z0-9 ]+/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toUpperCase();
 }
 
-function headerScore(row: any[]): number {
-  const norm = (row ?? []).map(normalizeHeaderCell).filter(Boolean);
+function normalizeHeaderRow(row: any[]): string[] {
+  return (row ?? []).map(normalizeHeaderCell);
+}
+
+function combineHeaderRows(rowA: any[], rowB: any[]): any[] {
+  const maxLen = Math.max(rowA?.length ?? 0, rowB?.length ?? 0);
+  const out: string[] = [];
+  for (let i = 0; i < maxLen; i++) {
+    const a = normalizeHeaderCell(rowA?.[i]);
+    const b = normalizeHeaderCell(rowB?.[i]);
+    out.push([a, b].filter(Boolean).join(' ').trim());
+  }
+  return out;
+}
+
+function headerScore(normalizedRow: string[]): number {
+  const norm = (normalizedRow ?? []).filter(Boolean);
   if (norm.length === 0) return -1;
   const joined = norm.join(' | ');
   let score = 0;
   for (const token of HEADER_TOKENS) {
     if (joined.includes(token)) score += 1;
   }
+  if (joined.includes('DEPARTAMENTO')) score += 2;
+  if (joined.includes('MUNICIPIO')) score += 2;
+  if (joined.includes('LATITUD')) score += 1;
+  if (joined.includes('LONGITUD')) score += 1;
   return score;
 }
 
-function findHeaderRowIndex(rows: any[][]): number {
-  const maxScan = Math.min(rows.length, 40);
-  let bestIdx = 0;
-  let bestScore = -1;
+function headerLooksRecognizable(normalizedRow: string[], score: number): boolean {
+  if (score < MIN_HEADER_SCORE) return false;
+  const joined = normalizedRow.join(' | ');
+  const hasCore = joined.includes('DEPARTAMENTO') || joined.includes('MUNICIPIO');
+  const hasGeo = joined.includes('LATITUD') || joined.includes('LONGITUD') || joined.includes('LAT GRADOS');
+  return hasCore && (hasGeo || score >= 4);
+}
+
+function headerFingerprint(normalizedRow: string[]): string {
+  const joined = normalizedRow.join(' | ');
+  const markers = [
+    'DEPARTAMENTO', 'MUNICIPIO', 'VEREDA', 'LAT GRADOS', 'LAT MINUTOS', 'LAT SEGUNDOS',
+    'LON GRADOS', 'LON MINUTOS', 'LON SEGUNDOS', 'LATITUD', 'LONGITUD', 'FECHA', 'TIPOLOGIA',
+    'INFORMACION HECHO', 'FENOMENO CRIMINALIDAD', 'MEDIOS', 'GENERO', 'ESTRUCTURA',
+    'RESPUESTA ACCION', 'ACCION ENEMIGA', 'RES TIPO',
+  ];
+  const present = markers.filter((m) => joined.includes(m));
+  return present.join('|');
+}
+
+function scanHeader(rows: any[][]): HeaderScanResult {
+  const maxScan = Math.min(rows.length, MAX_HEADER_SCAN_ROWS);
+  let best: HeaderScanResult = {
+    headerRowIndex: -1,
+    dataStartRowIndex: -1,
+    headerRow: [],
+    bestHeaderScore: -1,
+    normalizedHeader: [],
+    recognized: false,
+    signature: '',
+  };
 
   for (let i = 0; i < maxScan; i++) {
     const row = rows[i] ?? [];
-    const score = headerScore(row);
-    if (score > bestScore) {
-      bestScore = score;
-      bestIdx = i;
+    const normSingle = normalizeHeaderRow(row);
+    const singleScore = headerScore(normSingle);
+    if (singleScore > best.bestHeaderScore) {
+      best = {
+        headerRowIndex: i,
+        dataStartRowIndex: i + 1,
+        headerRow: row,
+        bestHeaderScore: singleScore,
+        normalizedHeader: normSingle,
+        recognized: headerLooksRecognizable(normSingle, singleScore),
+        signature: headerFingerprint(normSingle),
+      };
     }
-    const joined = row.map(normalizeHeaderCell).join(' | ');
-    if (joined.includes('DEPARTAMENTO') && joined.includes('MUNICIPIO')) {
-      return i;
+
+    if (i + 1 < maxScan) {
+      const nextRow = rows[i + 1] ?? [];
+      const nextNorm = normalizeHeaderRow(nextRow);
+      const nextScore = headerScore(nextNorm);
+      const combined = combineHeaderRows(row, nextRow);
+      const combinedScore = headerScore(combined);
+      if (combinedScore > best.bestHeaderScore) {
+        const useNextAsHeader = singleScore <= 0 && nextScore >= (combinedScore - 1);
+        const selectedHeaderRowIndex = useNextAsHeader ? (i + 1) : i;
+        const selectedNormalizedHeader = useNextAsHeader ? nextNorm : combined;
+        const selectedHeaderRow = useNextAsHeader ? nextRow : combined;
+        const selectedScore = useNextAsHeader ? nextScore : combinedScore;
+
+        best = {
+          headerRowIndex: selectedHeaderRowIndex,
+          dataStartRowIndex: i + 2,
+          headerRow: selectedHeaderRow,
+          bestHeaderScore: selectedScore,
+          normalizedHeader: selectedNormalizedHeader,
+          recognized: headerLooksRecognizable(selectedNormalizedHeader, selectedScore),
+          signature: headerFingerprint(selectedNormalizedHeader),
+        };
+      }
     }
   }
 
-  return bestIdx;
+  return best;
 }
 
-function parseGrid(rows: any[][], sheetName: string): ParseResult {
-  if (!rows || rows.length === 0) {
+function recalculateSheetRef(sheet: XLSX.WorkSheet): void {
+  const keys = Object.keys(sheet ?? {}).filter((k) => !k.startsWith('!'));
+  if (keys.length === 0) return;
+
+  let minR = Number.POSITIVE_INFINITY;
+  let minC = Number.POSITIVE_INFINITY;
+  let maxR = -1;
+  let maxC = -1;
+
+  for (const key of keys) {
+    try {
+      const decoded = XLSX.utils.decode_cell(key);
+      if (Number.isFinite(decoded.r) && Number.isFinite(decoded.c)) {
+        minR = Math.min(minR, decoded.r);
+        minC = Math.min(minC, decoded.c);
+        maxR = Math.max(maxR, decoded.r);
+        maxC = Math.max(maxC, decoded.c);
+      }
+    } catch {
+      // Ignorar claves que no sean coordenadas de celdas
+    }
+  }
+
+  if (maxR >= 0 && maxC >= 0 && Number.isFinite(minR) && Number.isFinite(minC)) {
+    sheet['!ref'] = XLSX.utils.encode_range({ s: { r: minR, c: minC }, e: { r: maxR, c: maxC } });
+  }
+}
+
+function getPreviewRows(rows: any[][], maxRows: number = 3): string[] {
+  const preview: string[] = [];
+  for (const row of rows) {
+    const cells = (row ?? [])
+      .map((c) => safeStr(extractCellValue(c)))
+      .filter(Boolean);
+    if (cells.length === 0) continue;
+    preview.push(cells.slice(0, 8).join(' | '));
+    if (preview.length >= maxRows) break;
+  }
+  return preview;
+}
+
+function parseGrid(rows: any[][], sheetName: string): ParsedSheetResult {
+  const safeRows = rows ?? [];
+  if (safeRows.length === 0) {
     return {
+      sheetName,
+      rows: safeRows,
       records: [],
-      debug: {
+      header: {
+        headerRowIndex: -1,
+        dataStartRowIndex: -1,
+        headerRow: [],
+        bestHeaderScore: -1,
+        normalizedHeader: [],
+        recognized: false,
+        signature: '',
+      },
+      diagnostic: {
         sheetName,
-        detectedHeaderRowIndex: -1,
-        detectedHeader: [],
-        expectedColumns: EXPECTED_COLUMNS,
-        totalRowsRead: 0,
+        totalRows: 0,
+        headerRowIndex: -1,
+        bestHeaderScore: -1,
+        previewRows: [],
       },
     };
   }
 
-  const headerIdx = findHeaderRowIndex(rows);
-  const headerRow = rows[headerIdx] ?? [];
-  const layout = detectColumnLayout(headerRow);
+  const header = scanHeader(safeRows);
+  const layout = detectColumnLayout(header.headerRow);
 
-  const dataRows = rows.slice(headerIdx + 1);
+  const dataRows = header.dataStartRowIndex >= 0
+    ? safeRows.slice(header.dataStartRowIndex)
+    : [];
+
   const records: IntelRecord[] = [];
   for (let i = 0; i < dataRows.length; i++) {
     const record = processRow(dataRows[i], i, layout);
@@ -477,36 +660,115 @@ function parseGrid(rows: any[][], sheetName: string): ParseResult {
   }
 
   return {
+    sheetName,
+    rows: safeRows,
     records,
-    debug: {
+    header,
+    diagnostic: {
       sheetName,
-      detectedHeaderRowIndex: headerIdx,
-      detectedHeader: headerRow.map((c) => safeStr(c)).filter((c) => c.length > 0),
+      totalRows: safeRows.length,
+      headerRowIndex: header.headerRowIndex,
+      bestHeaderScore: header.bestHeaderScore,
+      previewRows: getPreviewRows(safeRows),
+    },
+  };
+}
+
+function emptyParseResult(): ParseResult {
+  return {
+    records: [],
+    debug: {
+      sheetName: '',
+      detectedHeaderRowIndex: -1,
+      detectedHeader: [],
       expectedColumns: EXPECTED_COLUMNS,
-      totalRowsRead: rows.length,
+      totalRowsRead: 0,
+      matchedSheets: [],
+      sheetDiagnostics: [],
     },
   };
 }
 
 export function parseExcelFileDetailed(buffer: ArrayBuffer): ParseResult {
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true, raw: false });
-  const sheetName = workbook?.SheetNames?.[0] ?? '';
-  const sheet = workbook?.Sheets?.[sheetName];
-  if (!sheet) {
+  const workbook = XLSX.read(buffer, {
+    type: 'array',
+    cellDates: true,
+    raw: false,
+    dense: false,
+  });
+
+  const sheetNames = workbook?.SheetNames ?? [];
+  if (sheetNames.length === 0) return emptyParseResult();
+
+  const parsedSheets: ParsedSheetResult[] = [];
+  for (const sheetName of sheetNames) {
+    const sheet = workbook?.Sheets?.[sheetName];
+    if (!sheet) continue;
+    recalculateSheetRef(sheet);
+    const rows: any[][] = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: '',
+      raw: false,
+      blankrows: true,
+    }) ?? [];
+    parsedSheets.push(parseGrid(rows, sheetName));
+  }
+
+  if (parsedSheets.length === 0) return emptyParseResult();
+
+  const diagnostics = parsedSheets.map((s) => s.diagnostic);
+
+  const recognizedSheets = parsedSheets.filter((s) => s.header.recognized);
+  const candidates = (recognizedSheets.length > 0 ? recognizedSheets : parsedSheets)
+    .sort((a, b) => {
+      if (b.records.length !== a.records.length) return b.records.length - a.records.length;
+      return b.header.bestHeaderScore - a.header.bestHeaderScore;
+    });
+
+  const best = candidates[0];
+  if (!best) {
     return {
       records: [],
       debug: {
-        sheetName,
+        sheetName: '',
         detectedHeaderRowIndex: -1,
         detectedHeader: [],
         expectedColumns: EXPECTED_COLUMNS,
         totalRowsRead: 0,
+        matchedSheets: [],
+        sheetDiagnostics: diagnostics,
       },
     };
   }
 
-  const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) ?? [];
-  return parseGrid(rows, sheetName);
+  const signature = best.header.signature;
+  const mergeable = recognizedSheets.filter((s) => {
+    if (!s.header.recognized) return false;
+    if (!signature) return s.sheetName === best.sheetName;
+    return s.header.signature === signature;
+  });
+
+  const selectedSheets = mergeable.length > 0 ? mergeable : [best];
+  let recordId = 1;
+  const mergedRecords: IntelRecord[] = [];
+  for (const selected of selectedSheets) {
+    for (const rec of selected.records) {
+      mergedRecords.push({ ...rec, id: recordId++ });
+    }
+  }
+
+  return {
+    records: mergedRecords,
+    debug: {
+      sheetName: best.sheetName,
+      detectedHeaderRowIndex: best.header.headerRowIndex,
+      detectedHeader: best.header.normalizedHeader.filter(Boolean),
+      expectedColumns: EXPECTED_COLUMNS,
+      totalRowsRead: best.rows.length,
+      matchedSheets: selectedSheets.map((s) => s.sheetName),
+      sheetDiagnostics: diagnostics,
+    },
+  };
 }
 
 export function parseExcelFile(buffer: ArrayBuffer): IntelRecord[] {
@@ -514,7 +776,7 @@ export function parseExcelFile(buffer: ArrayBuffer): IntelRecord[] {
 }
 
 export function parseCSVFileDetailed(text: string): ParseResult {
-  const workbook = XLSX.read(text, { type: 'string', raw: false });
+  const workbook = XLSX.read(text, { type: 'string', raw: false, dense: false });
   const sheetName = workbook?.SheetNames?.[0] ?? '';
   const sheet = workbook?.Sheets?.[sheetName];
   if (!sheet) {
@@ -526,12 +788,28 @@ export function parseCSVFileDetailed(text: string): ParseResult {
         detectedHeader: [],
         expectedColumns: EXPECTED_COLUMNS,
         totalRowsRead: 0,
+        matchedSheets: [],
+        sheetDiagnostics: [],
       },
     };
   }
 
-  const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) ?? [];
-  return parseGrid(rows, sheetName);
+  recalculateSheetRef(sheet);
+  const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false, blankrows: true }) ?? [];
+  const parsed = parseGrid(rows, sheetName);
+
+  return {
+    records: parsed.records,
+    debug: {
+      sheetName,
+      detectedHeaderRowIndex: parsed.header.headerRowIndex,
+      detectedHeader: parsed.header.normalizedHeader.filter(Boolean),
+      expectedColumns: EXPECTED_COLUMNS,
+      totalRowsRead: rows.length,
+      matchedSheets: [sheetName],
+      sheetDiagnostics: [parsed.diagnostic],
+    },
+  };
 }
 
 export function parseCSVFile(text: string): IntelRecord[] {
@@ -567,12 +845,21 @@ export async function importFile(
       ? result.debug.detectedHeader.join(' | ')
       : '(sin encabezados detectados)';
     const expected = result.debug.expectedColumns.join(', ');
+    const diagnostics = (result.debug.sheetDiagnostics ?? [])
+      .map((s) => {
+        const headerRow = s.headerRowIndex >= 0 ? (s.headerRowIndex + 1) : 'N/A';
+        const preview = s.previewRows.length > 0 ? s.previewRows.join(' || ') : '(sin filas no vacías)';
+        return `- ${s.sheetName}: filas=${s.totalRows}, encabezado=${headerRow}, puntaje=${s.bestHeaderScore}, primerasFilas=${preview}`;
+      })
+      .join('\n');
+
     throw new Error(
       `No se encontraron registros válidos para importar. ` +
       `Hoja: "${result.debug.sheetName || 'N/A'}". ` +
       `Fila de encabezado detectada: ${result.debug.detectedHeaderRowIndex >= 0 ? (result.debug.detectedHeaderRowIndex + 1) : 'N/A'}. ` +
       `Encabezados detectados: ${headers}. ` +
-      `Columnas esperadas: ${expected}.`
+      `Columnas esperadas: ${expected}.` +
+      (diagnostics ? `\nDiagnóstico por hoja:\n${diagnostics}` : '')
     );
   }
 
