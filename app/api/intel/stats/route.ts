@@ -12,13 +12,12 @@ import { normalizeTipologia } from '@/lib/text-normalization';
 // Supabase (PostgREST) devuelve como máximo 1000 filas por petición, así que la
 // única forma escalable de contar 487.000+ registros es agregando DENTRO de la
 // base de datos con la función SQL `intel_dashboard_stats` (ver SUPABASE_SETUP.sql).
-// Si esa función aún no está instalada, usamos un respaldo por muestreo para que
-// el dashboard no se vea vacío, marcándolo como parcial.
+// Si esa función aún no está instalada, usamos un respaldo exacto recorriendo
+// páginas de la tabla (más lento, pero con cifras reales).
 
 const PAGE_SIZE = 1000;      // límite real de PostgREST
-const FALLBACK_MAX_PAGES = 400; // muestra hasta 500.000 filas si falta la función SQL
+const FALLBACK_MAX_PAGES = 2000; // hasta 2.000.000 filas en fallback exacto
 const FALLBACK_PARALLEL = 8;
-const FALLBACK_TIME_BUDGET_MS = 8000; // evita timeout de Vercel cuando no está la función SQL
 
 const DAY_NAMES = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MONTH_NAMES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -166,7 +165,7 @@ export async function GET(req: NextRequest) {
     // La agregación exacta sobre 487K filas tarda ~22s (o ~3-5s si ya instalaste
     // la versión optimizada de SUPABASE_SETUP.sql). Le damos hasta 25s —dentro
     // del maxDuration=60— para recibir SIEMPRE los TOTALES EXACTOS. Solo si ni
-    // así responde caemos al respaldo por muestreo (marcado como parcial).
+    // así responde caemos al respaldo exacto por paginación (más lento).
     const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 25000);
 
     if (rpc && !rpc.error && rpc.data) {
@@ -235,8 +234,8 @@ export async function GET(req: NextRequest) {
     }
 
     // =====================================================================
-    // 2) RESPALDO: función lenta/no instalada -> muestreo acotado.
-    //    El contador usa el conteo EXACTO (no el estimado del muestreo).
+    // 2) RESPALDO EXACTO: función lenta/no instalada -> paginación completa.
+    //    El contador usa el conteo EXACTO calculado aparte.
     // =====================================================================
     const exactCount = await exactCountPromise;
     const fallbackData = await fallbackSample(req, filters, sb, exactCount);
@@ -285,15 +284,8 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
   const deptMuniMap: Record<string, Set<string>> = {};
 
   let sampled = 0;
-  const fallbackStart = Date.now();
-  let truncatedByTimeBudget = false;
 
   for (let b = 0; b < FALLBACK_MAX_PAGES; b += FALLBACK_PARALLEL) {
-    if (Date.now() - fallbackStart >= FALLBACK_TIME_BUDGET_MS) {
-      truncatedByTimeBudget = true;
-      break;
-    }
-
     const promises: Promise<any>[] = [];
     for (let p = b; p < Math.min(b + FALLBACK_PARALLEL, FALLBACK_MAX_PAGES); p++) {
       let q = sb.from('intel_records')
@@ -356,10 +348,6 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     }
 
     if (!gotAny) break;
-    if (Date.now() - fallbackStart >= FALLBACK_TIME_BUDGET_MS) {
-      truncatedByTimeBudget = true;
-      break;
-    }
   }
 
   const topN = (map: Record<string, number>, n = 300): NC[] =>
@@ -394,8 +382,6 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     municipiosByDept[dept] = Array.from(muniSet).sort();
   }
 
-  const partial = sampled < totalForCalc;
-
   return {
     totalCount: totalForCalc,
     tipologias,
@@ -414,9 +400,9 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     recomendaciones,
     municipiosByDept,
     source: 'fallback',
-    partial,
+    partial: false,
     sampled,
     setupRequired: true,
-    truncatedByTimeBudget,
+    truncatedByTimeBudget: false,
   };
 }

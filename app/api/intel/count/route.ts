@@ -35,13 +35,28 @@ export async function GET() {
     if (!hasData) return noStore(NextResponse.json({ hasData: false, count: 0 }));
 
     let count: number | null = null;
-    try {
-      const est = await sb.from('intel_records').select('*', { count: 'estimated', head: true });
-      if (!est.error && typeof est.count === 'number' && est.count > 0) count = est.count;
-    } catch { /* el conteo es solo informativo */ }
+    let source: 'exact' | 'planned' | 'probe' = 'probe';
 
-    // Hay datos aunque el estimado aún no esté actualizado (sin ANALYZE): nunca 0.
-    return noStore(NextResponse.json({ hasData: true, count: count ?? 1, approximate: true }));
+    try {
+      const exact = await sb.from('intel_records').select('*', { count: 'exact', head: true });
+      if (!exact.error && typeof exact.count === 'number' && exact.count > 0) {
+        count = exact.count;
+        source = 'exact';
+      }
+    } catch { /* continúa con fallback */ }
+
+    if (count == null) {
+      try {
+        const planned = await sb.from('intel_records').select('*', { count: 'planned', head: true });
+        if (!planned.error && typeof planned.count === 'number' && planned.count > 0) {
+          count = planned.count;
+          source = 'planned';
+        }
+      } catch { /* continúa con fallback */ }
+    }
+
+    // Hay datos aunque el conteo exact/planned falle: nunca devolver 0.
+    return noStore(NextResponse.json({ hasData: true, count: count ?? 1, source }));
   } catch (err: any) {
     console.error('Count error:', err);
     return noStore(NextResponse.json({ error: String(err?.message ?? err), hasData: null }, { status: 503 }));

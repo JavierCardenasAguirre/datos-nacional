@@ -10,11 +10,13 @@ import AnalysisPanel from './analysis-panel';
 import PdfReportButton from './pdf-report';
 import WelcomeScreen from './welcome-screen';
 import DataGrid from './data-grid';
-import { Loader2, ArrowUp } from 'lucide-react';
+import { Loader2, ArrowUp, Crosshair, LayoutDashboard } from 'lucide-react';
+import EnemigoPanel from './enemigo-panel';
 
 export default function Dashboard() {
   const { isDataLoaded, isLoading, stats } = useIntel();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState<'general' | 'enemigo'>('general');
 
   const sidebarRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLElement>(null);
@@ -91,63 +93,92 @@ export default function Dashboard() {
           )}
 
           <div className="p-3">
-            {/* AVISO DISCRETO: datos parciales (solo si la agregación exacta no respondió) */}
-            {stats?.source === 'fallback' && (
-              <div className="mb-3 flex items-center gap-2 rounded-md border border-slate-600/40 bg-slate-800/60 px-3 py-1.5 text-[11px] text-slate-400">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0" />
-                <span>
-                  Desgloses en modo estimado
-                  {typeof stats.sampled === 'number' ? ` (muestra de ~${stats.sampled.toLocaleString()})` : ''}
-                  {' · '}el total de eventos es exacto.
-                </span>
-              </div>
-            )}
-            {/* GRÁFICOS */}
-            <div className="bg-slate-800/60 rounded-xl border border-slate-600/30 overflow-hidden mb-4 shadow-lg">
-              <div className="p-3 border-b border-slate-600/30 bg-slate-800/80">
-                <h2 className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
-                  <div className="w-2 h-2 bg-emerald-500 rounded-full" />
-                  DESGLOSE POR TIPOLOGIA Y ESTRUCTURAS
-                </h2>
-              </div>
-              <div className="p-4">
-                <ChartsPanel />
-              </div>
+            <div className="mb-3 inline-flex rounded-lg border border-slate-600/40 bg-slate-800/60 p-1">
+              <button
+                onClick={() => setActiveSection('general')}
+                className={`px-3 py-1.5 text-xs rounded-md font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                  activeSection === 'general'
+                    ? 'bg-cyan-600 text-white'
+                    : 'text-slate-300 hover:bg-slate-700/60'
+                }`}
+              >
+                <LayoutDashboard className="w-3.5 h-3.5" /> Vista General
+              </button>
+              <button
+                onClick={() => setActiveSection('enemigo')}
+                className={`px-3 py-1.5 text-xs rounded-md font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                  activeSection === 'enemigo'
+                    ? 'bg-cyan-600 text-white'
+                    : 'text-slate-300 hover:bg-slate-700/60'
+                }`}
+              >
+                <Crosshair className="w-3.5 h-3.5" /> Enemigo
+              </button>
             </div>
 
-            {/* MAPA + IA */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-              <div className="bg-slate-800/60 rounded-xl border border-slate-600/30 overflow-hidden shadow-lg">
-                <div className="p-3 border-b border-slate-600/30 bg-slate-800/80">
-                  <h2 className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
-                    <div className="w-2 h-2 bg-cyan-500 rounded-full animate-pulse" />
-                    MAPA DE INCIDENTES
-                  </h2>
-                </div>
-                <div className="p-3">
-                  <div className="rounded-lg overflow-hidden bg-slate-900/50" style={{ height: '420px' }}>
-                    <IntelMap />
+            {activeSection === 'general' ? (
+              <>
+                {/* AVISO DISCRETO: datos parciales (solo si la agregación exacta no respondió) */}
+                {stats?.source === 'fallback' && (
+                  <div className="mb-3 flex items-center gap-2 rounded-md border border-slate-600/40 bg-slate-800/60 px-3 py-1.5 text-[11px] text-slate-400">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0" />
+                    <span>
+                      Desgloses en modo estimado
+                      {typeof stats.sampled === 'number' ? ` (muestra de ~${stats.sampled.toLocaleString()})` : ''}
+                      {' · '}el total de eventos es exacto.
+                    </span>
+                  </div>
+                )}
+                {/* GRÁFICOS */}
+                <div className="bg-slate-800/60 rounded-xl border border-slate-600/30 overflow-hidden mb-4 shadow-lg">
+                  <div className="p-3 border-b border-slate-600/30 bg-slate-800/80">
+                    <h2 className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
+                      <div className="w-2 h-2 bg-emerald-500 rounded-full" />
+                      DESGLOSE POR TIPOLOGIA Y ESTRUCTURAS
+                    </h2>
+                  </div>
+                  <div className="p-4">
+                    <ChartsPanel />
                   </div>
                 </div>
-              </div>
 
-              <div className="bg-slate-800/60 rounded-xl border border-slate-600/30 overflow-hidden shadow-lg">
-                <div className="p-3 border-b border-slate-600/30 bg-slate-800/80">
-                  <h2 className="text-sm font-semibold text-purple-400 flex items-center gap-2">
-                    <div className="w-2 h-2 bg-purple-500 rounded-full" />
-                    ANALISIS IA - INTELIGENCIA PREDICTIVA
-                  </h2>
-                </div>
-                <div className="p-4" style={{ height: '420px', overflowY: 'auto' }}>
-                  <AnalysisPanel />
-                </div>
-              </div>
-            </div>
+                {/* MAPA + IA */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                  <div className="bg-slate-800/60 rounded-xl border border-slate-600/30 overflow-hidden shadow-lg">
+                    <div className="p-3 border-b border-slate-600/30 bg-slate-800/80">
+                      <h2 className="text-sm font-semibold text-cyan-400 flex items-center gap-2">
+                        <div className="w-2 h-2 bg-cyan-500 rounded-full animate-pulse" />
+                        MAPA DE INCIDENTES
+                      </h2>
+                    </div>
+                    <div className="p-3">
+                      <div className="rounded-lg overflow-hidden bg-slate-900/50" style={{ height: '420px' }}>
+                        <IntelMap />
+                      </div>
+                    </div>
+                  </div>
 
-            {/* GRILLA DE DATOS - parte inferior */}
-            <div className="mb-4">
-              <DataGrid />
-            </div>
+                  <div className="bg-slate-800/60 rounded-xl border border-slate-600/30 overflow-hidden shadow-lg">
+                    <div className="p-3 border-b border-slate-600/30 bg-slate-800/80">
+                      <h2 className="text-sm font-semibold text-purple-400 flex items-center gap-2">
+                        <div className="w-2 h-2 bg-purple-500 rounded-full" />
+                        ANALISIS IA - INTELIGENCIA PREDICTIVA
+                      </h2>
+                    </div>
+                    <div className="p-4" style={{ height: '420px', overflowY: 'auto' }}>
+                      <AnalysisPanel />
+                    </div>
+                  </div>
+                </div>
+
+                {/* GRILLA DE DATOS - parte inferior */}
+                <div className="mb-4">
+                  <DataGrid />
+                </div>
+              </>
+            ) : (
+              <EnemigoPanel />
+            )}
           </div>
 
           {/* Botón flotante volver arriba - contenido principal (mapa/gráficos) */}
