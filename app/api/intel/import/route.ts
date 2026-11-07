@@ -8,6 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import { getServiceSupabase } from '@/lib/supabase';
 import { normalizeTipologia } from '@/lib/text-normalization';
+import { sanitizeClientRowForImport } from '@/lib/intel-import-row';
 
 function parseDMS(g: any, m: any, s: any, isLon: boolean): number {
   const gn = parseFloat(String(g ?? 0)) || 0;
@@ -218,49 +219,6 @@ async function clearIntelRecords(sb: ReturnType<typeof getServiceSupabase>) {
   }
 }
 
-function toSupabaseRowFromClient(r: any): Record<string, any> | null {
-  const latG = sn(r?.lat_grados) || 0;
-  const latM = sn(r?.lat_minutos) || 0;
-  const latS = sn(r?.lat_segundos) || 0;
-  const lonG = sn(r?.lon_grados) || 0;
-  const lonM = sn(r?.lon_minutos) || 0;
-  const lonS = sn(r?.lon_segundos) || 0;
-
-  let lat = sn(r?.latitud);
-  let lon = sn(r?.longitud);
-  if (isNaN(lat) || lat === 0) lat = parseDMS(latG, latM, latS, false);
-  if (isNaN(lon) || lon === 0) lon = parseDMS(lonG, lonM, lonS, true);
-  if (lat === 0 && lon === 0) return null;
-  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
-
-  const out = {
-    departamento: ss(r?.departamento),
-    municipio: ss(r?.municipio),
-    vereda: ss(r?.vereda, 100),
-    lat_grados: latG,
-    lat_minutos: latM,
-    lat_segundos: latS,
-    lon_grados: lonG,
-    lon_minutos: lonM,
-    lon_segundos: lonS,
-    latitud: lat,
-    longitud: lon,
-    fecha: pd(r?.fecha),
-    tipologia: normalizeTipologia(ss(r?.tipologia, 200)),
-    informacion_hecho: ss(r?.informacion_hecho, 500),
-    fenomeno_criminalidad: ss(r?.fenomeno_criminalidad, 200),
-    medios: ss(r?.medios, 200),
-    genero: ss(r?.genero, 50),
-    estructura: ss(r?.estructura, 200),
-    respuesta_accion: ss(r?.respuesta_accion, 200),
-    accion_enemiga: ss(r?.accion_enemiga, 200),
-    res_tipo: ss(r?.res_tipo, 200),
-  };
-
-  if (!out.departamento && !out.municipio && !out.tipologia) return null;
-  return out;
-}
-
 export async function POST(req: NextRequest) {
   let tmpFile = '';
   try {
@@ -282,7 +240,7 @@ export async function POST(req: NextRequest) {
       }
 
       const rows = rawRows
-        .map((r: any) => toSupabaseRowFromClient(r))
+        .map((r: any) => sanitizeClientRowForImport(r))
         .filter((r: Record<string, any> | null): r is Record<string, any> => !!r);
 
       if (rows.length === 0) {

@@ -175,15 +175,15 @@ function processRow(row: any[], i: number, layout: ColumnLayout): IntelRecord | 
     latitud: lat,
     longitud: lon,
     fecha: parseDate(row[d + 11]),
-    tipologia: normalizeTipologia(safeStr(row[d + 12])),
-    informacionHecho: safeStr(row[d + 13], 200),
-    fenomenoCriminalidad: safeStr(row[d + 14]),
-    medios: safeStr(row[d + 15]),
-    genero: safeStr(row[generoIdx]),
-    estructura: safeStr(row[estructuraIdx]),
-    respuestaAccion: safeStr(row[respuestaIdx]),
-    accionEnemiga: safeStr(row[accionIdx]),
-    resTipo: safeStr(row[resTipoIdx]),
+    tipologia: normalizeTipologia(safeStr(row[d + 12], 200)),
+    informacionHecho: safeStr(row[d + 13], 500),
+    fenomenoCriminalidad: safeStr(row[d + 14], 200),
+    medios: safeStr(row[d + 15], 200),
+    genero: safeStr(row[generoIdx], 50),
+    estructura: safeStr(row[estructuraIdx], 200),
+    respuestaAccion: safeStr(row[respuestaIdx], 200),
+    accionEnemiga: safeStr(row[accionIdx], 200),
+    resTipo: safeStr(row[resTipoIdx], 200),
   };
 }
 
@@ -383,66 +383,159 @@ export function parsePastedRows(text: string): PastedRecord[] {
   return out;
 }
 
-export function parseExcelFile(buffer: ArrayBuffer): IntelRecord[] {
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
-  const sheetName = workbook?.SheetNames?.[0] ?? '';
-  const sheet = workbook?.Sheets?.[sheetName];
-  if (!sheet) return [];
-  const jsonData: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) ?? [];
-  const rows = jsonData?.slice(1) ?? [];
+const EXPECTED_COLUMNS = [
+  'DEPARTAMENTO', 'MUNICIPIO', 'VEREDA',
+  'LAT GRADOS', 'LAT MINUTOS', 'LAT SEGUNDOS',
+  'LON GRADOS', 'LON MINUTOS', 'LON SEGUNDOS',
+  'LATITUD', 'LONGITUD', 'FECHA', 'TIPOLOGIA',
+  'INFORMACION HECHO', 'FENOMENO CRIMINALIDAD', 'MEDIOS',
+  'GENERO', 'ESTRUCTURA', 'RESPUESTA ACCION', 'ACCION ENEMIGA', 'RES TIPO',
+];
+
+const HEADER_TOKENS = [
+  'DEPARTAMENTO', 'MUNICIPIO', 'TIPOLOGIA', 'FENOMENO',
+  'ESTRUCTURA', 'GENERO', 'RESPUESTA', 'ACCION', 'VEREDA',
+];
+
+export interface ParseDebugInfo {
+  sheetName: string;
+  detectedHeaderRowIndex: number;
+  detectedHeader: string[];
+  expectedColumns: string[];
+  totalRowsRead: number;
+}
+
+export interface ParseResult {
+  records: IntelRecord[];
+  debug: ParseDebugInfo;
+}
+
+function normalizeHeaderCell(v: any): string {
+  return safeStr(v)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+function headerScore(row: any[]): number {
+  const norm = (row ?? []).map(normalizeHeaderCell).filter(Boolean);
+  if (norm.length === 0) return -1;
+  const joined = norm.join(' | ');
+  let score = 0;
+  for (const token of HEADER_TOKENS) {
+    if (joined.includes(token)) score += 1;
+  }
+  return score;
+}
+
+function findHeaderRowIndex(rows: any[][]): number {
+  const maxScan = Math.min(rows.length, 40);
+  let bestIdx = 0;
+  let bestScore = -1;
+
+  for (let i = 0; i < maxScan; i++) {
+    const row = rows[i] ?? [];
+    const score = headerScore(row);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+    const joined = row.map(normalizeHeaderCell).join(' | ');
+    if (joined.includes('DEPARTAMENTO') && joined.includes('MUNICIPIO')) {
+      return i;
+    }
+  }
+
+  return bestIdx;
+}
+
+function parseGrid(rows: any[][], sheetName: string): ParseResult {
+  if (!rows || rows.length === 0) {
+    return {
+      records: [],
+      debug: {
+        sheetName,
+        detectedHeaderRowIndex: -1,
+        detectedHeader: [],
+        expectedColumns: EXPECTED_COLUMNS,
+        totalRowsRead: 0,
+      },
+    };
+  }
+
+  const headerIdx = findHeaderRowIndex(rows);
+  const headerRow = rows[headerIdx] ?? [];
+  const layout = detectColumnLayout(headerRow);
+
+  const dataRows = rows.slice(headerIdx + 1);
   const records: IntelRecord[] = [];
-  const layout = detectColumnLayout(jsonData?.[0] ?? rows?.[0] ?? []);
-  for (let i = 0; i < (rows?.length ?? 0); i++) {
-    const record = processRow(rows[i], i, layout);
+  for (let i = 0; i < dataRows.length; i++) {
+    const record = processRow(dataRows[i], i, layout);
     if (record) records.push(record);
   }
-  return records;
+
+  return {
+    records,
+    debug: {
+      sheetName,
+      detectedHeaderRowIndex: headerIdx,
+      detectedHeader: headerRow.map((c) => safeStr(c)).filter((c) => c.length > 0),
+      expectedColumns: EXPECTED_COLUMNS,
+      totalRowsRead: rows.length,
+    },
+  };
+}
+
+export function parseExcelFileDetailed(buffer: ArrayBuffer): ParseResult {
+  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true, raw: false });
+  const sheetName = workbook?.SheetNames?.[0] ?? '';
+  const sheet = workbook?.Sheets?.[sheetName];
+  if (!sheet) {
+    return {
+      records: [],
+      debug: {
+        sheetName,
+        detectedHeaderRowIndex: -1,
+        detectedHeader: [],
+        expectedColumns: EXPECTED_COLUMNS,
+        totalRowsRead: 0,
+      },
+    };
+  }
+
+  const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) ?? [];
+  return parseGrid(rows, sheetName);
+}
+
+export function parseExcelFile(buffer: ArrayBuffer): IntelRecord[] {
+  return parseExcelFileDetailed(buffer).records;
+}
+
+export function parseCSVFileDetailed(text: string): ParseResult {
+  const workbook = XLSX.read(text, { type: 'string', raw: false });
+  const sheetName = workbook?.SheetNames?.[0] ?? '';
+  const sheet = workbook?.Sheets?.[sheetName];
+  if (!sheet) {
+    return {
+      records: [],
+      debug: {
+        sheetName,
+        detectedHeaderRowIndex: -1,
+        detectedHeader: [],
+        expectedColumns: EXPECTED_COLUMNS,
+        totalRowsRead: 0,
+      },
+    };
+  }
+
+  const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) ?? [];
+  return parseGrid(rows, sheetName);
 }
 
 export function parseCSVFile(text: string): IntelRecord[] {
-  const workbook = XLSX.read(text, { type: 'string' });
-  const sheetName = workbook?.SheetNames?.[0] ?? '';
-  const sheet = workbook?.Sheets?.[sheetName];
-  if (!sheet) return [];
-  const jsonData: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) ?? [];
-  const rows = jsonData?.slice(1) ?? [];
-  const records: IntelRecord[] = [];
-  const layout = detectColumnLayout(jsonData?.[0] ?? rows?.[0] ?? []);
-  for (let i = 0; i < (rows?.length ?? 0); i++) {
-    const record = processRow(rows[i], i, layout);
-    if (record) records.push(record);
-  }
-  return records;
-}
-
-// Convert compact array from server to IntelRecord
-// Server format: [dept,muni,vereda,latG,latM,latS,lonG,lonM,lonS,lat,lon,fecha,
-//                 tipologia,infoHecho,fenomeno,medios,genero,estructura,respAccion,accEnemiga,resTipo]
-function compactToRecord(arr: any[], id: number): IntelRecord {
-  return {
-    id,
-    departamento: arr[0] ?? '',
-    municipio: arr[1] ?? '',
-    vereda: arr[2] ?? '',
-    latGrados: arr[3] ?? 0,
-    latMinutos: arr[4] ?? 0,
-    latSegundos: arr[5] ?? 0,
-    lonGrados: arr[6] ?? 0,
-    lonMinutos: arr[7] ?? 0,
-    lonSegundos: arr[8] ?? 0,
-    latitud: arr[9] ?? 0,
-    longitud: arr[10] ?? 0,
-    fecha: arr[11] ?? '',
-    tipologia: normalizeTipologia(arr[12] ?? ''),
-    informacionHecho: arr[13] ?? '',
-    fenomenoCriminalidad: arr[14] ?? '',
-    medios: arr[15] ?? '',
-    genero: arr[16] ?? '',
-    estructura: arr[17] ?? '',
-    respuestaAccion: arr[18] ?? '',
-    accionEnemiga: arr[19] ?? '',
-    resTipo: arr[20] ?? '',
-  };
+  return parseCSVFileDetailed(text).records;
 }
 
 export interface ImportProgress {
@@ -459,16 +552,30 @@ export async function importFile(
   onProgress?.({ message: `Leyendo archivo (${(file.size / 1024 / 1024).toFixed(1)} MB)...`, percent: 15 });
   const buffer = await file.arrayBuffer();
 
+  let result: ParseResult;
   if (isCSV) {
     const text = new TextDecoder().decode(buffer);
     onProgress?.({ message: 'Procesando CSV en el navegador...', percent: 60 });
-    const records = parseCSVFile(text);
-    onProgress?.({ message: `CSV procesado (${records.length.toLocaleString()} filas válidas)`, percent: 100 });
-    return records;
+    result = parseCSVFileDetailed(text);
+  } else {
+    onProgress?.({ message: 'Procesando Excel en el navegador...', percent: 60 });
+    result = parseExcelFileDetailed(buffer);
   }
 
-  onProgress?.({ message: 'Procesando Excel en el navegador...', percent: 60 });
-  const records = parseExcelFile(buffer);
-  onProgress?.({ message: `Excel procesado (${records.length.toLocaleString()} filas válidas)`, percent: 100 });
-  return records;
+  if (result.records.length === 0) {
+    const headers = result.debug.detectedHeader.length > 0
+      ? result.debug.detectedHeader.join(' | ')
+      : '(sin encabezados detectados)';
+    const expected = result.debug.expectedColumns.join(', ');
+    throw new Error(
+      `No se encontraron registros válidos para importar. ` +
+      `Hoja: "${result.debug.sheetName || 'N/A'}". ` +
+      `Fila de encabezado detectada: ${result.debug.detectedHeaderRowIndex >= 0 ? (result.debug.detectedHeaderRowIndex + 1) : 'N/A'}. ` +
+      `Encabezados detectados: ${headers}. ` +
+      `Columnas esperadas: ${expected}.`
+    );
+  }
+
+  onProgress?.({ message: `${isCSV ? 'CSV' : 'Excel'} procesado (${result.records.length.toLocaleString()} filas válidas)`, percent: 100 });
+  return result.records;
 }
