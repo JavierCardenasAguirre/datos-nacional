@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabase } from '@/lib/supabase';
-import { verifyPassword, createToken, COOKIE_NAME } from '@/lib/auth';
+import { verifyPassword, createToken, COOKIE_NAME, effectiveRole } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   try {
@@ -40,16 +40,17 @@ export async function POST(req: NextRequest) {
       }, { status: 403 });
     }
 
+    const role = effectiveRole(user.email, user.role);
     const token = await createToken({
       id: user.id,
       email: user.email,
       name: user.name,
-      role: user.role,
+      role,
       status: user.status,
     });
 
     const res = NextResponse.json({
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status },
+      user: { id: user.id, email: user.email, name: user.name, role, status: user.status },
     });
     res.cookies.set(COOKIE_NAME, token, {
       httpOnly: true,

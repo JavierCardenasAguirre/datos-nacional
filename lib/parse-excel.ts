@@ -107,12 +107,12 @@ function safeNum(val: any): number {
 }
 
 
-interface ColumnLayout {
+export interface ColumnLayout {
   deptIdx: number;
   hasBlankAfterMedios: boolean;
 }
 
-function detectColumnLayout(row: any[]): ColumnLayout {
+export function detectColumnLayout(row: any[]): ColumnLayout {
   const rowValues = row ?? [];
   const first = safeStr(rowValues[0]);
   const second = safeStr(rowValues[1]);
@@ -135,7 +135,7 @@ function detectColumnLayout(row: any[]): ColumnLayout {
   return { deptIdx, hasBlankAfterMedios };
 }
 
-function processRow(row: any[], i: number, layout: ColumnLayout): IntelRecord | null {
+export function processRow(row: any[], i: number, layout: ColumnLayout): IntelRecord | null {
   if (!row || (row?.length ?? 0) < 10) return null;
 
   const d = layout.deptIdx;
@@ -383,7 +383,7 @@ export function parsePastedRows(text: string): PastedRecord[] {
   return out;
 }
 
-const EXPECTED_COLUMNS = [
+export const EXPECTED_COLUMNS = [
   'DEPARTAMENTO', 'MUNICIPIO', 'VEREDA',
   'LAT GRADOS', 'LAT MINUTOS', 'LAT SEGUNDOS',
   'LON GRADOS', 'LON MINUTOS', 'LON SEGUNDOS',
@@ -399,7 +399,7 @@ const HEADER_TOKENS = [
   'LATITUD', 'LONGITUD', 'INFORMACION HECHO', 'MEDIOS', 'RES TIPO',
 ];
 
-const MAX_HEADER_SCAN_ROWS = 200;
+export const MAX_HEADER_SCAN_ROWS = 200;
 const MIN_HEADER_SCORE = 2;
 
 export interface SheetDiagnostic {
@@ -425,7 +425,7 @@ export interface ParseResult {
   debug: ParseDebugInfo;
 }
 
-interface HeaderScanResult {
+export interface HeaderScanResult {
   headerRowIndex: number;
   dataStartRowIndex: number;
   headerRow: any[];
@@ -522,7 +522,7 @@ function headerFingerprint(normalizedRow: string[]): string {
   return present.join('|');
 }
 
-function scanHeader(rows: any[][]): HeaderScanResult {
+export function scanHeader(rows: any[][]): HeaderScanResult {
   const maxScan = Math.min(rows.length, MAX_HEADER_SCAN_ROWS);
   let best: HeaderScanResult = {
     headerRowIndex: -1,
@@ -607,7 +607,7 @@ function recalculateSheetRef(sheet: XLSX.WorkSheet): void {
   }
 }
 
-function getPreviewRows(rows: any[][], maxRows: number = 3): string[] {
+export function getPreviewRows(rows: any[][], maxRows: number = 3): string[] {
   const preview: string[] = [];
   for (const row of rows) {
     const cells = (row ?? [])

@@ -30,9 +30,10 @@ export default function WelcomeScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/intel/count');
+        const res = await fetch(`/api/intel/count?_=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) { setDbCount(null); return; }
         const data = await res.json();
-        setDbCount(data?.count ?? 0);
+        setDbCount(data?.hasData ? Math.max(1, data?.count ?? 1) : 0);
       } catch {
         setDbCount(0);
       } finally {

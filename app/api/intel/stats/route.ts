@@ -12,13 +12,12 @@ import { normalizeTipologia } from '@/lib/text-normalization';
 // Supabase (PostgREST) devuelve como máximo 1000 filas por petición, así que la
 // única forma escalable de contar 487.000+ registros es agregando DENTRO de la
 // base de datos con la función SQL `intel_dashboard_stats` (ver SUPABASE_SETUP.sql).
-// Si esa función aún no está instalada, usamos un respaldo por muestreo para que
-// el dashboard no se vea vacío, marcándolo como parcial.
+// Si esa función aún no está instalada, usamos un respaldo exacto recorriendo
+// páginas de la tabla (más lento, pero con cifras reales).
 
 const PAGE_SIZE = 1000;      // límite real de PostgREST
-const FALLBACK_MAX_PAGES = 400; // muestra hasta 500.000 filas si falta la función SQL
+const FALLBACK_MAX_PAGES = 2000; // hasta 2.000.000 filas en fallback exacto
 const FALLBACK_PARALLEL = 8;
-const FALLBACK_TIME_BUDGET_MS = 8000; // evita timeout de Vercel cuando no está la función SQL
 
 const DAY_NAMES = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MONTH_NAMES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -89,30 +88,43 @@ function buildRpcArgs(filters: any) {
 //   1) RPC intel_count  -> exacto, inmune al límite de 8s de Supabase.
 //   2) count:'exact'    -> exacto vía PostgREST (por si la RPC no está instalada).
 //   3) count:'estimated'-> último recurso, para no mostrar 0.
-async function getExactCount(sb: ReturnType<typeof getServiceSupabase>, filters: any): Promise<number | null> {
-  // 1) Función SQL ligera
+async function withAbort<T>(fn: (signal: AbortSignal) => PromiseLike<T>, ms: number): Promise<T | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const c = await sb.rpc('intel_count', buildRpcArgs(filters));
-    if (!c.error && typeof c.data === 'number') return c.data;
-  } catch { /* sigue al plan B */ }
-
-  // 2) Conteo exacto por PostgREST
-  try {
-    let q = sb.from('intel_records').select('*', { count: 'exact', head: true });
-    q = applyFilters(q, filters);
-    const x = await q;
-    if (!x.error && x.count != null) return x.count;
-  } catch { /* sigue al plan C */ }
-
-  // 3) Estimado (último recurso)
-  try {
-    let q = sb.from('intel_records').select('*', { count: 'estimated', head: true });
-    q = applyFilters(q, filters);
-    const e = await q;
-    return e.count ?? null;
+    return await fn(controller.signal);
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+// Cada paso tiene su propio límite de tiempo para que la ruta completa nunca
+// supere el maxDuration de Vercel (si se pasa, Vercel corta y el dashboard
+// recibe un error -> mostraba 0 registros).
+async function getExactCount(sb: ReturnType<typeof getServiceSupabase>, filters: any): Promise<number | null> {
+  // 1) Función SQL ligera (count(*) exacto)
+  const c: any = await withAbort((signal) => sb.rpc('intel_count', buildRpcArgs(filters)).abortSignal(signal), 20000);
+  if (c && !c.error && c.data != null && Number.isFinite(Number(c.data))) return Number(c.data);
+
+  // 2) Conteo exacto por PostgREST
+  const x: any = await withAbort((signal) => {
+    let q = sb.from('intel_records').select('*', { count: 'exact', head: true });
+    q = applyFilters(q, filters);
+    return q.abortSignal(signal);
+  }, 8000);
+  if (x && !x.error && x.count != null) return x.count;
+
+  // 3) Estimado (último recurso). Un estimado <= 0 no es fiable justo después
+  //    de una importación masiva (estadísticas sin actualizar): se ignora.
+  const e: any = await withAbort((signal) => {
+    let q = sb.from('intel_records').select('*', { count: 'estimated', head: true });
+    q = applyFilters(q, filters);
+    return q.abortSignal(signal);
+  }, 5000);
+  if (e && !e.error && typeof e.count === 'number' && e.count > 0) return e.count;
+  return null;
 }
 
 // Llama a la función pesada de agregación con un límite de tiempo. Si no
@@ -153,7 +165,7 @@ export async function GET(req: NextRequest) {
     // La agregación exacta sobre 487K filas tarda ~22s (o ~3-5s si ya instalaste
     // la versión optimizada de SUPABASE_SETUP.sql). Le damos hasta 25s —dentro
     // del maxDuration=60— para recibir SIEMPRE los TOTALES EXACTOS. Solo si ni
-    // así responde caemos al respaldo por muestreo (marcado como parcial).
+    // así responde caemos al respaldo exacto por paginación (más lento).
     const rpc = await callBigRpcWithTimeout(sb, rpcArgs, 25000);
 
     if (rpc && !rpc.error && rpc.data) {
@@ -161,7 +173,10 @@ export async function GET(req: NextRequest) {
       // El contador SIEMPRE usa el conteo exacto y fresco (no el de la RPC, por
       // si sus estadísticas quedaran atrás); si falla, usa el de la RPC.
       const exactCount = await exactCountPromise;
-      const total: number = exactCount ?? d.totalCount ?? 0;
+      const rpcTotal = Number(d.totalCount ?? 0) || 0;
+      // Nunca dejar que un conteo 0 (estadísticas desactualizadas) tape el
+      // total real que sí devolvió la agregación.
+      const total: number = (exactCount && exactCount > 0) ? exactCount : rpcTotal;
 
       const dowArr: { d: number; count: number }[] = Array.isArray(d.dow) ? d.dow : [];
       const monthArr: { m: number; count: number }[] = Array.isArray(d.month) ? d.month : [];
@@ -219,8 +234,8 @@ export async function GET(req: NextRequest) {
     }
 
     // =====================================================================
-    // 2) RESPALDO: función lenta/no instalada -> muestreo acotado.
-    //    El contador usa el conteo EXACTO (no el estimado del muestreo).
+    // 2) RESPALDO EXACTO: función lenta/no instalada -> paginación completa.
+    //    El contador usa el conteo EXACTO calculado aparte.
     // =====================================================================
     const exactCount = await exactCountPromise;
     const fallbackData = await fallbackSample(req, filters, sb, exactCount);
@@ -269,15 +284,8 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
   const deptMuniMap: Record<string, Set<string>> = {};
 
   let sampled = 0;
-  const fallbackStart = Date.now();
-  let truncatedByTimeBudget = false;
 
   for (let b = 0; b < FALLBACK_MAX_PAGES; b += FALLBACK_PARALLEL) {
-    if (Date.now() - fallbackStart >= FALLBACK_TIME_BUDGET_MS) {
-      truncatedByTimeBudget = true;
-      break;
-    }
-
     const promises: Promise<any>[] = [];
     for (let p = b; p < Math.min(b + FALLBACK_PARALLEL, FALLBACK_MAX_PAGES); p++) {
       let q = sb.from('intel_records')
@@ -340,10 +348,6 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     }
 
     if (!gotAny) break;
-    if (Date.now() - fallbackStart >= FALLBACK_TIME_BUDGET_MS) {
-      truncatedByTimeBudget = true;
-      break;
-    }
   }
 
   const topN = (map: Record<string, number>, n = 300): NC[] =>
@@ -378,8 +382,6 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     municipiosByDept[dept] = Array.from(muniSet).sort();
   }
 
-  const partial = sampled < totalForCalc;
-
   return {
     totalCount: totalForCalc,
     tipologias,
@@ -398,9 +400,9 @@ async function fallbackSample(_req: NextRequest, filters: any, sb: ReturnType<ty
     recomendaciones,
     municipiosByDept,
     source: 'fallback',
-    partial,
+    partial: false,
     sampled,
     setupRequired: true,
-    truncatedByTimeBudget,
+    truncatedByTimeBudget: false,
   };
 }

@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabase } from '@/lib/supabase';
-import { hashPassword, createToken, COOKIE_NAME } from '@/lib/auth';
+import { hashPassword } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,40 +23,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Este email ya est\u00e1 registrado' }, { status: 409 });
     }
 
-    // Check if this is the first user (will be admin)
-    const { count } = await sb.from('app_users').select('*', { count: 'exact', head: true });
-    const isFirstUser = (count ?? 0) === 0;
-
+    // Nadie se vuelve administrador al registrarse: el único admin es
+    // ADMIN_EMAIL. Todos los registros quedan pendientes de aprobación.
     const password_hash = await hashPassword(password);
 
-    const { data: newUser, error } = await sb.from('app_users').insert({
+    const { error } = await sb.from('app_users').insert({
       email: email.toLowerCase().trim(),
       password_hash,
       name: name.trim(),
-      role: isFirstUser ? 'admin' : 'user',
-      status: isFirstUser ? 'approved' : 'pending',
-    }).select('id, email, name, role, status').single();
+      role: 'user',
+      status: 'pending',
+    });
 
     if (error) {
       console.error('Register error:', error);
       return NextResponse.json({ error: 'Error al registrar usuario' }, { status: 500 });
     }
 
-    // If first user (admin), log them in immediately
-    if (isFirstUser) {
-      const token = await createToken(newUser);
-      const res = NextResponse.json({ user: newUser, message: 'Cuenta de administrador creada exitosamente' });
-      res.cookies.set(COOKIE_NAME, token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 60 * 60 * 24 * 7, // 7 days
-        path: '/',
-      });
-      return res;
-    }
-
-    // Not first user - pending approval
     return NextResponse.json({
       user: null,
       message: 'Registro exitoso. Tu cuenta est\u00e1 pendiente de aprobaci\u00f3n por el administrador.',

@@ -63,3 +63,51 @@ export function getTokenFromCookieHeader(cookieHeader: string | null): string | 
 }
 
 export { COOKIE_NAME };
+
+// ---------------------------------------------------------------------------
+// ADMINISTRADOR ÚNICO
+// Solo esta cuenta puede ser administradora. Aunque en la base de datos otra
+// cuenta tenga role='admin', el servidor la trata como usuario normal.
+// Se puede cambiar con la variable de entorno ADMIN_EMAIL (opcional).
+// ---------------------------------------------------------------------------
+export const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? 'amdres.di@gmail.com').toLowerCase().trim();
+
+export function isAdminEmail(email: string | null | undefined): boolean {
+  return !!email && email.toLowerCase().trim() === ADMIN_EMAIL;
+}
+
+/** Rol efectivo: 'admin' solo si el email es el del administrador único. */
+export function effectiveRole(email: string | null | undefined, dbRole?: string | null): 'admin' | 'user' {
+  return isAdminEmail(email) && (dbRole ?? 'admin') === 'admin' ? 'admin' : 'user';
+}
+
+/**
+ * Lee el usuario de la sesión y lo VUELVE A VERIFICAR en la base de datos
+ * (para que un usuario eliminado/rechazado o un ex-admin pierda el acceso de
+ * inmediato, sin esperar a que caduque su token de 7 días).
+ */
+export async function getVerifiedSessionUser(): Promise<UserPayload | null> {
+  const session = await getSessionUser();
+  if (!session?.id) return null;
+  const { getServiceSupabase } = await import('./supabase');
+  const sb = getServiceSupabase();
+  const { data, error } = await sb.from('app_users')
+    .select('id, email, name, role, status')
+    .eq('id', session.id)
+    .maybeSingle();
+  if (error || !data) return null;
+  return {
+    id: data.id,
+    email: data.email,
+    name: data.name,
+    role: effectiveRole(data.email, data.role),
+    status: data.status,
+  };
+}
+
+/** Devuelve el admin verificado en BD, o null si quien llama no es el admin. */
+export async function requireAdmin(): Promise<UserPayload | null> {
+  const u = await getVerifiedSessionUser();
+  if (!u || u.status !== 'approved' || u.role !== 'admin') return null;
+  return u;
+}

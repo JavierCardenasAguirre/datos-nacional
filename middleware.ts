@@ -2,6 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
 
 const COOKIE_NAME = 'datacore_session';
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? 'amdres.di@gmail.com').toLowerCase().trim();
+// Rutas que solo puede usar el administrador (además de /api/admin/*).
+function isAdminOnly(pathname: string, method: string): boolean {
+  if (pathname.startsWith('/api/admin')) return true;
+  if (pathname.startsWith('/api/intel/import')) return true;
+  if (pathname.startsWith('/api/intel/destroy')) return true;
+  if (pathname.startsWith('/api/parse-excel')) return true;
+  if (pathname.startsWith('/api/intel/records') && method !== 'GET') return true;
+  return false;
+}
 const PUBLIC_PATHS = ['/login', '/register', '/api/auth/login', '/api/auth/register', '/api/auth/logout', '/api/auth/me'];
 
 function isPublicPath(pathname: string): boolean {
@@ -48,7 +58,8 @@ export async function middleware(req: NextRequest) {
     }
 
     // Admin-only routes
-    if (pathname.startsWith('/api/admin') && payload.role !== 'admin') {
+    const isAdmin = payload.role === 'admin' && String(payload.email ?? '').toLowerCase().trim() === ADMIN_EMAIL;
+    if (isAdminOnly(pathname, req.method) && !isAdmin) {
       return NextResponse.json({ error: 'Solo administradores' }, { status: 403 });
     }
 
