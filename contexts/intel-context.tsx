@@ -121,6 +121,40 @@ const emptyUniqueValues: UniqueValues = {
 
 const IntelContext = createContext<IntelContextType | null>(null);
 
+// Marca local "ya hay datos en la nube". Sirve para que, al refrescar, la app
+// vaya directo al dashboard aunque la verificación del servidor tarde o falle
+// (p. ej. justo después de importar 500k filas la base queda ocupada un rato).
+const HAS_DATA_KEY = 'datacore_has_data';
+function setHasDataHint(v: boolean) {
+  try {
+    if (v) localStorage.setItem(HAS_DATA_KEY, '1');
+    else localStorage.removeItem(HAS_DATA_KEY);
+  } catch { /* modo privado / sin storage */ }
+}
+function getHasDataHint(): boolean {
+  try { return localStorage.getItem(HAS_DATA_KEY) === '1'; } catch { return false; }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Consulta /api/intel/count. Devuelve true/false, o null si no se pudo saber. */
+async function checkHasData(timeoutMs = 20000): Promise<boolean | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`/api/intel/count?_=${Date.now()}`, { cache: 'no-store', signal: controller.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (typeof data?.hasData === 'boolean') return data.hasData;
+    if (typeof data?.count === 'number') return data.count > 0;
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function buildParams(f: Filters): string {
   const p = new URLSearchParams();
   if (f.fechaInicio) p.set('fechaInicio', f.fechaInicio);
@@ -178,6 +212,11 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
     abortRef.current = controller;
     setIsLoading(true);
 
+    // Reintentos: tras una importación grande la base puede tardar en responder
+    // (o la función de Vercel cortar por tiempo). En vez de dejar el dashboard en
+    // 0, se reintenta con espera creciente.
+    const MAX_ATTEMPTS = isInitial ? 4 : 2;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const params = buildParams(f);
       const timestamp = Date.now();
@@ -205,6 +244,13 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       const mapData = await parseJsonResponse<{ points?: MapPoint[]; total?: number; displayed?: number }>(mapRes, '/api/intel/map-points');
       if (controller.signal.aborted) return;
 
+      // Sin filtros, un total 0 con puntos en el mapa = respuesta incompleta: reintentar
+      const noFilters = buildParams(f) === '';
+      const looksEmpty = (statsData?.totalCount ?? 0) <= 0 && (mapData.points?.length ?? 0) > 0;
+      if (noFilters && looksEmpty && attempt < MAX_ATTEMPTS) {
+        throw new Error('Totales aún no disponibles');
+      }
+
       setStats(statsData);
       setMapPoints(mapData.points ?? []);
       setMapInfo({ total: mapData.total ?? 0, displayed: mapData.displayed ?? 0 });
@@ -212,12 +258,20 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
       if (isInitial) {
         setUniqueValues(deriveUniqueValues(statsData));
       }
+      if (noFilters && ((statsData?.totalCount ?? 0) > 0 || (mapData.points?.length ?? 0) > 0)) {
+        setHasDataHint(true);
+      }
+      break;
     } catch (err: any) {
-      if (err?.name === 'AbortError') return;
-      console.error('Load data error:', err);
-    } finally {
-      if (!controller.signal.aborted) setIsLoading(false);
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
+      console.error(`Load data error (intento ${attempt}/${MAX_ATTEMPTS}):`, err);
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(2000 * attempt);
+        if (controller.signal.aborted) return;
+      }
     }
+    }
+    if (!controller.signal.aborted) setIsLoading(false);
   }, []);
 
   // 🔥 REFRESH STATS MEJORADO CON TIMESTAMP
@@ -278,18 +332,37 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
     hasChecked.current = true;
 
     (async () => {
-      try {
-        const res = await fetch('/api/intel/count');
-        const data = await res.json();
-        if ((data?.count ?? 0) > 0) {
+      // Si este navegador ya importó/vio datos, ir directo al dashboard
+      // mientras se confirma con el servidor.
+      const hint = getHasDataHint();
+      if (hint) {
+        setIsDataLoaded(true);
+        loadData(defaultFilters, true);
+      }
+
+      let hasData = await checkHasData();
+      if (hasData === null) {
+        await sleep(3000);
+        hasData = await checkHasData();
+      }
+
+      if (hasData === true) {
+        setHasDataHint(true);
+        if (!hint) {
           setIsDataLoaded(true);
           await loadData(defaultFilters, true);
-        } else {
-          setIsLoading(false);
         }
-      } catch (err) {
-        console.error('Check data error:', err);
+      } else if (hasData === false) {
+        // Confirmado por el servidor: la tabla está vacía
+        setHasDataHint(false);
+        setIsDataLoaded(false);
+        setStats(null);
         setIsLoading(false);
+      } else {
+        // No se pudo verificar (servidor lento/caído). No mandamos al usuario a
+        // reimportar: si había marca local seguimos en el dashboard.
+        console.error('No se pudo verificar si hay datos en la base.');
+        if (!hint) setIsLoading(false);
       }
     })();
   }, [loadData]);
@@ -300,6 +373,7 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
   }, [loadData]);
 
   const refreshData = useCallback(async () => {
+    setHasDataHint(true);
     setIsDataLoaded(true);
     setFiltersRaw(defaultFilters);
     await loadData(defaultFilters, true);
@@ -307,6 +381,7 @@ export function IntelProvider({ children }: { children: React.ReactNode }) {
 
   const destroyData = useCallback(async () => {
     await fetch('/api/intel/destroy', { method: 'DELETE' });
+    setHasDataHint(false);
     setIsDataLoaded(false);
     setStats(null);
     setMapPoints([]);

@@ -89,30 +89,43 @@ function buildRpcArgs(filters: any) {
 //   1) RPC intel_count  -> exacto, inmune al límite de 8s de Supabase.
 //   2) count:'exact'    -> exacto vía PostgREST (por si la RPC no está instalada).
 //   3) count:'estimated'-> último recurso, para no mostrar 0.
-async function getExactCount(sb: ReturnType<typeof getServiceSupabase>, filters: any): Promise<number | null> {
-  // 1) Función SQL ligera
+async function withAbort<T>(fn: (signal: AbortSignal) => PromiseLike<T>, ms: number): Promise<T | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const c = await sb.rpc('intel_count', buildRpcArgs(filters));
-    if (!c.error && typeof c.data === 'number') return c.data;
-  } catch { /* sigue al plan B */ }
-
-  // 2) Conteo exacto por PostgREST
-  try {
-    let q = sb.from('intel_records').select('*', { count: 'exact', head: true });
-    q = applyFilters(q, filters);
-    const x = await q;
-    if (!x.error && x.count != null) return x.count;
-  } catch { /* sigue al plan C */ }
-
-  // 3) Estimado (último recurso)
-  try {
-    let q = sb.from('intel_records').select('*', { count: 'estimated', head: true });
-    q = applyFilters(q, filters);
-    const e = await q;
-    return e.count ?? null;
+    return await fn(controller.signal);
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+// Cada paso tiene su propio límite de tiempo para que la ruta completa nunca
+// supere el maxDuration de Vercel (si se pasa, Vercel corta y el dashboard
+// recibe un error -> mostraba 0 registros).
+async function getExactCount(sb: ReturnType<typeof getServiceSupabase>, filters: any): Promise<number | null> {
+  // 1) Función SQL ligera (count(*) exacto)
+  const c: any = await withAbort((signal) => sb.rpc('intel_count', buildRpcArgs(filters)).abortSignal(signal), 20000);
+  if (c && !c.error && c.data != null && Number.isFinite(Number(c.data))) return Number(c.data);
+
+  // 2) Conteo exacto por PostgREST
+  const x: any = await withAbort((signal) => {
+    let q = sb.from('intel_records').select('*', { count: 'exact', head: true });
+    q = applyFilters(q, filters);
+    return q.abortSignal(signal);
+  }, 8000);
+  if (x && !x.error && x.count != null) return x.count;
+
+  // 3) Estimado (último recurso). Un estimado <= 0 no es fiable justo después
+  //    de una importación masiva (estadísticas sin actualizar): se ignora.
+  const e: any = await withAbort((signal) => {
+    let q = sb.from('intel_records').select('*', { count: 'estimated', head: true });
+    q = applyFilters(q, filters);
+    return q.abortSignal(signal);
+  }, 5000);
+  if (e && !e.error && typeof e.count === 'number' && e.count > 0) return e.count;
+  return null;
 }
 
 // Llama a la función pesada de agregación con un límite de tiempo. Si no
@@ -161,7 +174,10 @@ export async function GET(req: NextRequest) {
       // El contador SIEMPRE usa el conteo exacto y fresco (no el de la RPC, por
       // si sus estadísticas quedaran atrás); si falla, usa el de la RPC.
       const exactCount = await exactCountPromise;
-      const total: number = exactCount ?? d.totalCount ?? 0;
+      const rpcTotal = Number(d.totalCount ?? 0) || 0;
+      // Nunca dejar que un conteo 0 (estadísticas desactualizadas) tape el
+      // total real que sí devolvió la agregación.
+      const total: number = (exactCount && exactCount > 0) ? exactCount : rpcTotal;
 
       const dowArr: { d: number; count: number }[] = Array.isArray(d.dow) ? d.dow : [];
       const monthArr: { m: number; count: number }[] = Array.isArray(d.month) ? d.month : [];

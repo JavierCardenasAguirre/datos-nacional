@@ -30,3 +30,12 @@ notify pgrst, 'reload schema';
 --     las estadísticas/consultas del dashboard usen bien los índices.
 -- ============================================================================
 -- analyze public.intel_records;
+
+-- ============================================================================
+--  PASO EXTRA · Actualizar estadísticas tras una importación masiva
+-- ============================================================================
+--  Después de cargar cientos de miles de filas, Postgres aún "cree" que la
+--  tabla está vacía hasta que actualiza sus estadísticas. Esto hace lentas las
+--  funciones del dashboard y que los conteos estimados den 0. Ejecutar una vez
+--  después de cada carga grande (tarda segundos, no modifica datos):
+analyze public.intel_records;
